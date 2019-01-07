@@ -28,41 +28,30 @@ use vars qw($VERSION);
 $VERSION = '0.01';
 
 my @VALID_OPS = qw(
-  Equals NotEqual GreaterThan LessThan GreaterThanOrEquals LessThanOrEquals 
-  BeginsWith EndsWith Contains IsNull IsNotNull IsThisDay Like NotLike 
+  Equals NotEqual GreaterThan LessThan GreaterThanOrEquals LessThanOrEquals
+  BeginsWith EndsWith Contains IsNull IsNotNull IsThisDay Like NotLike
   SoundsLike
 );
 
 my @VALID_CONDITIONS = qw(AND OR);
 
-#has app => sub { shift }, weak => 1;
 has cache => sub { Mojo::Recache->new(app => shift) };
-has collection => sub {
-  Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::WebService::Role::Query')->new;
+has cache_c => sub {
+  shift->cache->as(Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Query')->new);
 };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
-has max_records => 2_500;
-has max_memory => 250_000;
 has limits => sub { Mojo::Autotask::Limits->new };
-has log => sub { Mojo::Log->new };
-has username => sub { die "No username provided" };
+has max_memory => 250_000;
+has max_records => 2_500;
 has password => sub { die "No password provided" };
 has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.5/atws.asmx') };
+has username => sub { die "No username provided" };
 has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_5/') };
-has ws_ref => sub { Mojo::URL->new('https://www.autotask.net/help/Content/AdminSetup/2ExtensionsIntegrations/APIs/ExecuteCommand/UsingExecuteCommandAPI.htm') };
 
 has valid_entities => sub { {} };
 has picklist_values => sub { {} };
 
 has _api_records_per_query => 500;
-
-# $at->as_collection(sub { $_->cache->query(@_) });
-# $at->as_collection($self->cache->query(@_));
-# $at->as_collection(@{$self->cache->query(@_)});
-sub as_collection {
-  my ($self, $cb) = (shift, shift);
-  return $self->collection->new(ref $cb eq 'CODE' ? map { @{$_->$cb} } $self : ref $cb eq 'ARRAY' ? @$cb : ($cb, @_));
-}
 
 sub create {
   my ($self, @entities) = @_;
@@ -320,7 +309,7 @@ sub query {
   my $name = $cache->name(query => \@args);
   my $short = $cache->short($name);
   my $data = $cache->retrieve($name);
-  $data = ref $data eq 'ARRAY' ? $data : [];
+  $data = [] unless ref $data eq 'ARRAY';
   $data = {map { $_->{id} => $_ } @$data};
   my @since = $self->limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_}));
   my @limits = $limits->limit($entity) if blessed($limits) && $limits->isa('Mojo::Autotask::Limits');
@@ -353,18 +342,18 @@ sub query {
 
     my @at = _get_entity_results($res);
     my $fetched = scalar @at;
-    $self->log->debug(sprintf '[%s] Fetched %s results', $short, $fetched);
+    $cache->log->debug(sprintf '[%s] Fetched %s results', $short, $fetched);
     last unless $fetched;
     $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
-    $self->log->debug(sprintf '[%s] Kept %s results', $short, scalar @at);
-    $self->log->debug(sprintf '[%s] %s', $short, "Last ID: $last_id");
-    $self->log->debug(sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data);
+    $cache->log->debug(sprintf '[%s] Kept %s results', $short, scalar @at);
+    $cache->log->debug(sprintf '[%s] %s', $short, "Last ID: $last_id");
+    $cache->log->debug(sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data);
     warn sprintf "%s: %s", scalar keys %$data, total_size($data);
     #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
     $data = {%$data, map { $_->{id} => $_ } @at};
     warn sprintf "%s: %s", scalar keys %$data, total_size($data);
     $mu->record(scalar keys %$data);
-    $self->log->debug(sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1]);
+    $cache->log->debug(sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1]);
     #$mu->dump;
     last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
   }
@@ -489,7 +478,7 @@ sub _init_soap {
 
   # Create an empty hashref for the proxies arg if we don't already have one
   # defined.
-  $self->{_proxies} = {};
+  $self->{_proxies} ||= {};
 
   # MED: Replace SOAP::Lite transactions with non-blocking Mojo::UserAgent promise
   #      Only needed for processing XML (and even that could be replaced by Mojo::DOM)
@@ -504,24 +493,23 @@ sub _init_soap {
   $self->{error} = '';
 
   # Check that we are using the right SOAP proxy.
-  my $res = $cache->expires(86_400 * 30)->get_zone_info($self->username);
+  my $res = $cache->expires(86_400 * 30)->get_zone_info;
   if ($res->{Error} || $res->{ErrorCode}) {
-    die sprintf "Could not find correct Autotask Proxy for user %s: %s", $self->username, $res->{ErrorCode};
+    die sprintf "Could not find correct Autotask Proxy for user: %s", $self->username;
   }
   # Set the proper URL base for ExecuteCommand
   $self->ec->zone(Mojo::URL->new($res->{WebUrl}));
   # See if our SOAP proxy matches the one provided.
-  if ($self->soap_proxy ne $res->{URL}) {
+  if ($self->soap_proxy->to_string ne $res->{URL}) {
     if (exists($self->{_proxies}->{$res->{URL}})) {
       die sprintf "Infinite recursion detected. We have already tried the SOAP proxy %s but have been directed to it again", $res->{URL};
     }
-    $self->{_proxies}->{$self->soap_proxy} = 1;
-    $self->soap_proxy(Mojo::URL->new($res->{URL}));
-    return $self->new(username => $self->username, password => $self->password, soap_proxy => $self->soap_proxy, _proxies => $self->{_proxies});
+    $self->{_proxies}->{$self->soap_proxy->to_string} = 1;
+    return $self->new(username => $self->username, password => $self->password, soap_proxy => Mojo::URL->new($res->{URL}), _proxies => $self->{_proxies});
   }
 
   # Get a list of all the entity types available.
-  $res = $cache->expires(86_400 * 30)->get_entity_info($self->username);
+  $res = $cache->expires(86_400 * 30)->get_entity_info;
   if (!exists($res->{EntityInfo}) || ref($res->{EntityInfo}) ne 'ARRAY') {
     die "Unable to get a list of valid Entities from the Autotask server";
   }
@@ -719,3 +707,427 @@ sub _validate_fields {
 }
 
 1;
+
+=encoding utf8
+
+=head1 NAME
+
+Mojo::Autotask - Interface to the Autotask WebServices SOAP API and
+ExecuteCommand URL builder.
+
+=head1 SYNOPSIS
+
+  my $at = Mojo::Autotask->new(
+    username => 'user@autotask.account.com',
+    password => 'some_password'
+  );
+
+  my $list = $at->query(Account => query => [
+    {
+      name => 'AccountName',
+      expressions => [{op => 'BeginsWith', value => 'b'}]
+    },
+  ]);
+
+  $list->[0]->{AccountName} = 'New Account Name';
+
+  $at->update(@$list);
+
+  $list = $at->create(
+    bless({
+      AccountName => "Testing Account Name",
+      Phone => "800-555-1234",
+      AccountType => 1,
+      OwnerResourceID => 123456,
+    }, 'Account')
+  );
+
+=head1 DESCRIPTION
+
+L<Mojo::Autotask> is a module that provides an interface to the Autotask
+WebServices SOAP API and ExecuteCommand URL builder. Using this method and your
+Autotask login credentials you can access and manage your Autotask items using
+this interface. You should read the Autotask L<WebServices SOAP-based API
+documentation|https://ww5.autotask.net/help/Content/LinkedDOCUMENTS/WSAPI/T_WebServicesAPIv1_5.pdf>
+and L<ExecuteCommand URL builder documentation|https://ww5.autotask.net/help/Content/LinkedDOCUMENTS/PDFBatchOutput/ExecuteCommandAPI.pdf>
+prior to using this module.
+
+Note: all input is assumed to be UTF-8.
+
+=head1 ATTRIBUTES
+
+L<Mojo::Autotask> implements the following attributes.
+
+=head2 cache
+
+  my $cache = $at->cache;
+  $at       = $at->cache(Mojo::Recache->new);
+
+L<Mojo::Recache> object used to cache slow queries from Autotask.
+
+=head2 cache_c
+
+  my $cache = $at->cache_c;
+  $at       = $at->cache_c(shift->cache);
+
+L<Mojo::Recache> object used to cache slow queries from Autotask. Defaults to
+a roled Mojo::Collection instance of L</"cache">.
+
+=head2 ec
+
+  my $ec = $at->ec;
+  $at    = $at->ec(Mojo::Autotask::ExecuteCommand->new);
+
+L<Mojo::Autotask::ExecuteCommand> object used to build Autotask ExecuteCommand
+URLs.
+
+=head2 limits
+
+  my $limits = $at->limites;
+  $at        = $at->limits(Mojo::Autotask::Limits->new);
+
+L<Mojo::Autotask::Limits> object used for refining the query filter.
+
+=head2 log
+
+  my $log = $at->log;
+  $at     = $at->log(Mojo::Log->new);
+
+L<Mojo::Log> object used for logging.
+
+=head2 max_memory
+
+  my $max_memory = $at->max_memory;
+  $at            = $at->max_memory(500_000);
+
+L<Mojo::Autotask> can consume a lot of memory with the amount of data that might
+be pulled through the API. L</"max_memory"> limits the amount of data retrieved
+by limiting the amount of memory used by the perl process. Defaults to 250,000
+bytes.
+
+=head2 max_records
+
+  my $max_records = $at->max_records;
+  $at             = $at->max_records(5_000);
+
+Autotask WebServices API returns a maximum of 500 records per fetch;
+L<Mojo::Autotask> automatically continues to make additional fetches, capturing
+an additional 500 records per fetch, for a maximum collection of L</"max_records">
+records. Defaults to 2,500.
+
+=head2 password
+
+  my $password = $at->password;
+  $at          = $at->password('secret');
+
+Autotask WebServices API password. This attribute is required and has no
+default value.
+
+=head2 soap_proxy
+
+  my $soap_proxy = $at->soap_proxy;
+  $at            = $at->soap_proxy(Mojo::URL->new);
+
+The L<Mojo::URL> object for the Autotask WebServices API SOAP Proxy URL.
+Defaults to https://webservices.autotask.net/atservices/1.5/atws.asmx.
+
+If you know which proxy server you are to use then you may supply it here. By
+default one of the proxies is used and then the correct proxy is determined
+after logging in. If the default proxy is not correct the correct proxy will
+then be logged into automatically. This option should not be required.
+
+=head2 username
+
+  my $username = $at->username;
+  $at          = $at->username('user@abc.xyz');
+
+Autotask WebServices API username. This attribute is required and has no
+default value.
+
+It is recommended to create a new API-only Autotask account for each
+application. This limits the effect of password breaches as well as enables
+auditing within Autotask to know which application took what action.
+
+=head2 ws_url
+
+  my $ws_url = $at->ws_url;
+  $at        = $at->us_url(Mojo::URL->new);
+
+The L<Mojo::URL> object for the Autotask WebServices API SOAP URL.
+Defaults to http://autotask.net/ATWS/v1_5/.
+
+=head1 METHODS
+
+=head2 query(%args)
+
+Generic query method to query the Autotask system for entity data. This takes
+a hash ref as its argument. If an error occurs while trying to parse the given
+arguments or creating the associated QueryXML query this method will die with
+an appropriate error. Returns either the single matching entry as a hash
+reference, or an array of hash references when more than one result is returned.
+The following keys are allowed:
+
+=over 4
+
+=item B<entity>
+
+The name of the entity you want to query for.
+
+=item B<query>
+
+An array reference of fields and conditions that are used to construct the
+query XML. See below for the definition of a field and a condition.
+
+=over 4
+
+=item B<field>
+
+A field is a hash reference that contains the following entries
+
+=over 4
+
+=item B<name>
+
+The name of the field to be querying.
+
+=item B<udf>
+
+Boolean value to indicate if this field is a user defined field or not. Only
+one UDF field is allowed per query, by default if ommited this is set to
+false.
+
+=item B<expressions>
+
+An array of hash references for the expressions to apply to this field. The
+keys for this hash refernce are:
+
+=over 4
+
+=item B<op>
+
+The operator to use. One of: Equals, NotEqual, GreaterThan, LessThan,
+GreaterThanOrEquals, LessThanOrEquals, BeginsWith, EndsWith, Contains, IsNull,
+IsNotNull, IsThisDay, Like, NotLike or SoundsLike. If not in this list an
+error will be issued.
+
+=item B<value>
+
+The appropriate value to go with the given operator.
+
+=back
+
+=back
+
+=item B<condition>
+
+A condition block that allows you define a more complex query. Each condition
+element is a hash reference with the following fields:
+
+=over 4
+
+=item B<operator>
+
+The condition operator to be used. If no operator value is given AND is assumed.
+Valid operators are: AND and OR.
+
+=item B<elements>
+
+Each condition contains a list of field and/or expression elements. These have
+already been defined above.
+
+=back
+
+=back
+
+An example of a valid query woudl be:
+
+ query => [
+ 	{
+ 		name => 'AccountName',
+ 		expressions => [{op => 'Equals', value => 'New Account'}]
+	},
+	{
+		operator => 'OR',
+		elements => [
+			{
+				name => 'FirstName',
+				expressions => [
+					{op => 'BeginsWith', value => 'A'},
+					{op => 'EndsWith', value => 'S'}
+				]
+			},
+			{
+				name => 'LastName',
+				expressions => [
+					{op => 'BeginsWith', value => 'A'},
+					{op => 'EndsWith', value => 'S'}
+				]
+			}
+		]
+	}
+ ]
+
+This will find all accounts with the AccountName of New Account that also
+have either a FirstName or a LastName that begins with an A and ends with an
+S.
+
+=back
+
+=head2 update(@entities)
+
+Update the given entities. Entites will be verified prior to submitted to
+verify that they can be updated, any fields that are not updatable will
+be ignored. Each object reference needs to be blessed with the entity type
+that it is (Account, Contact, etc). Returns the list of entites that were
+updated successfully. If an error occurs $@ will be set and undef is returned.
+See the section on Entity format for more details on how to format entities to
+be accepted by this method.
+
+sub update {
+	my ($self, @entities) = @_;
+
+	die "Missing entity argument in call to query" if (!@entities);
+
+	# Validate that we have the right arguments.
+	my @list;
+	foreach my $ent (@entities) {
+		$self->_validate_entity_argument($ent, 'update');
+
+		# Get the entity information if we don't already have it.
+		$self->_load_entity_field_info(blessed($ent));
+
+		# Verify all fields provided are valid.
+		$self->_validate_fields($ent);
+
+		push(@list, _entity_as_soap_data($ent));
+	}
+
+	my $soap = $self->{at_soap};
+	my $res = $soap->update(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)))->result;
+
+	if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+		# There were errors. Grab the errors and set $@ to their textual values.
+		$self->_set_error($res->{Errors}->{ATWSError});
+		return undef;
+	}
+
+	return _get_entity_results($res);
+}
+
+=head2 create(@entities)
+
+Create the given entities. Entites will be verified prior to submitted to
+verify that they can be created, any fields that are not creatable will
+be ignored on creation. Each object reference needs to be blessed with the
+entity type it is (Account, Contact, etc). Returns the list of entites that
+were created successfully. If an error occurs $@ will be set and undef is
+returned. See the section on Entity format for more details on how to format
+entities to be accepted by this method.
+
+=head2 get_picklist_options($entity, $field)
+
+Return a hash that contains the ID values and options for a picklist field
+item. If the field is not a picklist field then an empty hash will be
+retruned. The hash is formated with the labels as keys and the values as the
+values.
+
+=head2 create_attachment($attach)
+
+Create a new attachment. Takes a hashref containing Data (the raw data of
+the attachment) and Info, which contains the AttachmentInfo. Returns the
+new attachment ID on success.
+
+=head2 get_attachment($id)
+
+Fetch an attachment; the only argument is the attachment ID. Returns a
+hashref of attachment Data and Info, or undef if the specified attachment
+doesn't exist or if there is an error.
+
+=head2 delete_attachment($id)
+
+Delete an attachment; the only argument is the attachment ID. Returns true on
+success or sets the error string on failure.
+
+=head1 ENTITY FORMAT
+
+The follow section details how to format a variable that contains entity
+informaiton. Entites are required for creating and updating items in the
+Autotask database.
+
+An entity is a blessed hash reference. It is bless with the name of the type
+of entity that it is (Account, Contract, Contact, etc). They keys of the hash
+are the field names found in the Autotask entity object. The values are the
+corresponding values to be used.
+
+A special key is used for all user defined fields (UserDefinedFields). This
+entry contains a hash reference containing one key UserDefinedField. This is
+in turn an array reference containing each user defined field. The user
+defined field entry looks simliar to this:
+
+  {
+    UserDefinedField => [
+      {
+        Name => "UserDefinedField1",
+        Value => "Value for Field"
+      },
+      {
+        Name => "SecondUDF",
+        Value => "Value for SecondUDF"
+      }
+    ]
+  }
+
+When used together the entire structure looks something simliar to this:
+
+  bless({
+    FieldName1 => "Value for FieldName1",
+    Field2 => "Value for Field2",
+    UserDefinedFields => {
+      UserDefinedField => [
+        {
+          Name => "UserDefinedField1",
+          Value => "Value for Field"
+        },
+        {
+          Name => "SecondUDF",
+          Value => "Value for SecondUDF"
+        }
+      ]
+    }
+  }, 'EntityName')
+
+Obviously the above is just an example. You will need to look at the actual
+fields that are allowed for each Autotask entity. The user defined fields also
+will depend on how your instance of Autotask has been configured.
+
+=head1 DEPENDENCIES
+
+L<Mojolicious>, L<SOAP::Lite>, L<MIME::Base64>, L<Memory::Usage>, L<Devel::Size>
+
+=head2 optional
+
+L<Mojo::Recache>
+
+=head1 AUTHOR
+
+Original L<WebService::Autotask> by Derek Wueppelmann (derek@roaringpenguin.com)
+
+Attachment, UTF-8 support added by Chris Adams (cmadams@hiwaay.net)
+
+Refactored as L<Mojo::Autotask> by Stefan Adams (stefan@adams.fm)
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2019 Stefan Adams and others.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
+Autotask (tm) is a trademark of Autotask.
+
+=head1 SEE ALSO
+
+L<https://github.com/s1037989/mojo-autotask>, L<Mojolicious::Guides>,
+L<https://mojolicious.org>, L<Minion>, L<Mojo::Recache>.
+
+=cut

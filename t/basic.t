@@ -1,19 +1,27 @@
-use Mojo::Base -base;
+use Mojo::Base -strict;
+
+BEGIN { $ENV{MOJO_REACTOR} = 'Mojo::Reactor::Poll' }
+
+use Test::More;
+
+plan skip_all => 'set TEST_ONLINE to enable this test' unless $ENV{TEST_ONLINE};
+
 use Test::Mojo;
 
 use Mojo::Autotask;
 use Mojo::Util 'dumper';
 
-my $at = Mojo::Autotask->new(username => $ENV{AUTOTASK_USERNAME}, password => $ENV{AUTOTASK_PASSWORD});
+my ($username, $password) = ($ENV{TEST_ONLINE} =~ /^([^:]+):(.*?)$/);
+my $at = Mojo::Autotask->new(username => $username, password => $password);
 warn $at->get_threshold_and_usage_info->{EntityReturnInfoResults}->{EntityReturnInfo}->{Message};
 warn $at->ec->open_ticket_detail(TicketNumber => 'T20181231.0001');
 warn time;
-my $cache = $at->cache->expires(86_400);
-warn $at->as_collection($cache->query(Account => [
+my $cache = $at->cache_c->expires(86_400);
+warn $cache->query(Account => [
   {
     name => 'AccountName',
     expressions => [{op => 'BeginsWith', value => 'b'}]
   },
-]))->size;
-warn scalar @{$cache->query('Account')};
+])->size;
+warn $cache->query('Account')->size;
 warn time;
