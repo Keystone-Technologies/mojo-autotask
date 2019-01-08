@@ -10,7 +10,6 @@ sub register {
   push @{$app->commands->namespaces}, 'Mojo::Autotask::Command';
   my $cache = Mojo::Recache->new(home => $app->home, log => $app->log);
   my $at = Mojo::Autotask->new(%$conf, cache => $cache);
-  $at->cache->app($app);
   $app->helper('autotask' => sub {$at});
 }
 

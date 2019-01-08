@@ -348,10 +348,10 @@ sub query {
     $cache->log->debug(sprintf '[%s] Kept %s results', $short, scalar @at);
     $cache->log->debug(sprintf '[%s] %s', $short, "Last ID: $last_id");
     $cache->log->debug(sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data);
-    warn sprintf "%s: %s", scalar keys %$data, total_size($data);
+    warn sprintf "%s records, %s memory", scalar keys %$data, total_size($data);
     #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
     $data = {%$data, map { $_->{id} => $_ } @at};
-    warn sprintf "%s: %s", scalar keys %$data, total_size($data);
+    warn sprintf "%s records, %s memory", scalar keys %$data, total_size($data);
     $mu->record(scalar keys %$data);
     $cache->log->debug(sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1]);
     #$mu->dump;
@@ -474,7 +474,7 @@ sub _get_entity_results {
 sub _init_soap {
   my $self = shift;
 
-  my $cache = $self->cache;
+  my $cache = $self->cache->app($self);
 
   # Create an empty hashref for the proxies arg if we don't already have one
   # defined.
