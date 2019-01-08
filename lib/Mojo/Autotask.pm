@@ -53,6 +53,13 @@ has picklist_values => sub { {} };
 
 has _api_records_per_query => 500;
 
+sub clone {
+  my $self  = shift;
+  my $clone = $self->SUPER::new(@_);
+  $clone->{$_} //= $self->{$_} for keys %$self;
+  return $clone;
+}
+
 sub create {
   my ($self, @entities) = @_;
 
@@ -505,7 +512,7 @@ sub _init_soap {
       die sprintf "Infinite recursion detected. We have already tried the SOAP proxy %s but have been directed to it again", $res->{URL};
     }
     $self->{_proxies}->{$self->soap_proxy->to_string} = 1;
-    return $self->new(username => $self->username, password => $self->password, soap_proxy => Mojo::URL->new($res->{URL}), _proxies => $self->{_proxies});
+    return $self->clone(soap_proxy => Mojo::URL->new($res->{URL}), _proxies => $self->{_proxies})->_init_soap;
   }
 
   # Get a list of all the entity types available.
@@ -857,6 +864,13 @@ The L<Mojo::URL> object for the Autotask WebServices API SOAP URL.
 Defaults to http://autotask.net/ATWS/v1_5/.
 
 =head1 METHODS
+
+=head2 clone
+
+  my $at = $at->clone;
+
+Clone the autotask object instance, attributes passed to clone overwrite any
+attributes set in the original instance.
 
 =head2 query(%args)
 
