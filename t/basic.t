@@ -15,6 +15,7 @@ my ($username, $password) = ($ENV{TEST_ONLINE} =~ /^([^:]+):(.*?)$/);
 my $at = Mojo::Autotask->new(username => $username, password => $password);
 warn $at->get_threshold_and_usage_info->{EntityReturnInfoResults}->{EntityReturnInfo}->{Message};
 warn $at->ec->open_ticket_detail(TicketNumber => 'T20181231.0001');
+warn dumper $at->get_field_info_c('Ticket', 'AccountID');
 warn time;
 my $cache = $at->cache_c->expires(86_400);
 warn $cache->query(Account => [

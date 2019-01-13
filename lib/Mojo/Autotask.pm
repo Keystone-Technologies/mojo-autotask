@@ -37,19 +37,31 @@ my @VALID_CONDITIONS = qw(AND OR);
 
 has cache => sub { Mojo::Recache->new(app => shift) };
 has cache_c => sub {
-  shift->cache->as(Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Query')->new);
+  shift->cache->as(Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Expand')->new);
 };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
+has entity_info => sub { shift->cache->get_entity_info };
+has field_info => sub {
+  my $self = shift;
+  my $fields = {};
+  my $entity_info = $self->entity_info;
+  foreach ( @$entity_info ) {
+    my $entity = $_->{Name};
+    $fields->{$entity} = $self->cache->get_field_info($entity);
+  }
+  return $fields;
+};
 has limits => sub { Mojo::Autotask::Limits->new };
 has max_memory => 250_000;
 has max_records => 2_500;
 has password => sub { die "No password provided" };
 has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.5/atws.asmx') };
+has threshold_and_usage_info => sub { shift->cache->get_threshold_and_usage_info };
 has username => sub { die "No username provided" };
 has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_5/') };
+has zone_info => sub { shift->cache->get_zone_info };
 
 has valid_entities => sub { {} };
-has picklist_values => sub { {} };
 
 has _api_records_per_query => 500;
 
@@ -163,28 +175,6 @@ sub delete_attachment {
   return 1;
 }
 
-# HIGH:  This function is needed
-# Usage: $at->as_collection(sub{$_->cache->query})->expand->grep(sub{$_->{Ticket_ref_QueueID_name} == 'New'})->first->{id}
-# Usage: my $query = $at->cache->query('Ticket');
-#        $at->as_collection($query)->expand->grep(sub{$_->{Ticket_ref_QueueID_name} == 'New'})->first->{id}
-#sub expand {
-#  my ($self, $entity, $record) = @_;
-#  $self->entity_info;
-#  $self->get_field_info($entity)->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
-#    $record->{"$_->{Name}_ref"} = defined $_->{Name} && $_->{ReferenceEntityType} && defined $record->{$_->{Name}} ? join(':', $_->{ReferenceEntityType}, $record->{$_->{Name}}) : '';
-#  });
-#  $self->get_field_info($entity)->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
-#    $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $self->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
-#  });
-#  $self->get_field_info($entity)->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
-#    return unless $record->{$_->{Name}};
-#    $record->{$_->{Name}} =~ s/\.\d+$//;
-#    eval { $record->{$_->{Name}} = Time::Piece->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
-#    delete $record->{$_->{Name}} if $@;
-#  });
-#  return $record;
-#}
-
 sub get_attachment {
   my ($self, $id) = @_;
 
@@ -198,104 +188,39 @@ sub get_attachment {
   return $res;
 }
 
-#sub _init {
-#  my $self = shift;
-#  $self->app->log->debug(sprintf 'pre-loading %s schemas', $self->entity_info->size);
-#  $self->entity_info->each(sub{
-#    my $entity = $_->{Name};
-#    $self->attr($entity => sub {
-#      my $info = Mojo::Collection->with_roles('+Hashes')->new(@{$self->_get_field_info($entity)});
-#      $info->grep(sub{$_->{IsPickList} eq 'true' && ref $_->{PicklistValues} eq 'HASH' && ref $_->{PicklistValues}->{PickListValue} eq 'ARRAY'})->each(sub{
-#        $_->{PickList} = Mojo::Collection->with_roles('+Hashes')->new(@{$_->{PicklistValues}->{PickListValue}});
-#      });
-#      return $info;
-#    });
-#  });
-#  return $self;
-#}
 
-#sub get_entity_info {
-#  my ($self, $entity) = @_;
-#  return $entity ? $self->init->entity_info->grep(sub{$_->{Name} eq $entity}) : $self->init->entity_info;
-#}
-#sub _entity_info {
-#  return Mojo::Collection->with_roles('+Hashes')->new(@{shift->_get_entity_info});
-#}
-#sub _get_entity_info {
-#  my $self = shift;
-#  $self->app->log->debug('getting entity info');
-#  Mojo::DiskCache->new(home => $self->app->home, expire => 86_400 * 30)->cache(get_entity_info => sub {
-#    my ($cache, $function) = @_;
-#    $self->at->{at_soap}->GetEntityInfo->result->{EntityInfo};
-#  });
-#}
-sub get_entity_info { shift->{_at_soap}->GetEntityInfo->result }
+sub get_entity_info { shift->{_at_soap}->GetEntityInfo->result->{EntityInfo} }
 
-#sub get_field_info {
-#  my ($self, $entity, $field) = @_;
-#  die "missing entity" unless $entity;
-#  return $field ? $self->init->$entity->grep(sub{$_->{Name} eq $field}) : $self->init->$entity;
-#}
-#sub _get_field_info {
-#  my ($self, $entity) = @_;
-#  $self->app->log->debug("getting $entity field info");
-#  die "missing entity" unless $entity;
-#  my $info = Mojo::DiskCache->new(home => $self->app->home, expire => 86_400 * 30)->cache(get_field_info => $entity, sub {
-#    my ($cache, $function, $entity) = @_;
-#    $self->at->{at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value($entity))->result->{Field};
-#  });
-#}
+sub get_entity_info_c {
+  my ($self, $entity) = @_;
+  my $entity_info = $self->cache_c->as->new(@{$self->entity_info});
+  return $entity ? $entity_info->grep(sub{$_->{Name} eq $entity}) : $entity_info;
+}
 
-#sub get_picklist_options {
-#  my ($self, $entity, $field, $kv, $vk) = @_;
-#  die "missing entity" unless $entity;
-#  die "missing field" unless $field;
-#  my $picklist = $self->get_field_info($entity, $field)->map(sub{$_->{PickList}})->first;
-#  return '' unless $picklist;
-#  if ( $kv && defined $vk ) {
-#    my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
-#    return $picklist->grep(sub{$_->{$kv} eq $vk})->map(sub{$_->{$_kv}})->first || '';
-#  }
-#  return $picklist;
-#}
-sub get_picklist_options {
+sub get_field_info { shift->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift))->result->{Field} }
+
+sub get_field_info_c {
   my ($self, $entity, $field) = @_;
+  my $field_info = $self->cache_c->as->new(@{$self->field_info->{$entity}});
+  return $field ? $field_info->grep(sub{$_->{Name} eq $field}) : $field_info;
+}
 
-  # See if we have this item cached.
-  if (!exists($self->picklist_values->{$entity})) {
-    $self->picklist_values->{$entity} = {};
+sub get_picklist_options {
+  my ($self, $entity, $field, $kv, $vk) = @_;
+  die "missing entity" unless $entity;
+  die "missing field" unless $field;
+  my $picklist = $self->get_field_info($entity, $field)->map(sub{$_->{PickList}})->first;
+  return '' unless $picklist;
+  if ( $kv && defined $vk ) {
+    my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
+    return $picklist->grep(sub{$_->{$kv} eq $vk})->map(sub{$_->{$_kv}})->first || '';
   }
-  if (!exists($self->picklist_values->{$entity}->{$field})) {
-    # first get the entity information.
-    $self->_load_entity_field_info($entity);
-
-    # Next find the field inside this entity.
-    my $data = $self->valid_entities->{$entity}->{fields}->{$field};
-
-    if (!exists($data->{PicklistValues}) || ref($data->{PicklistValues}) ne 'HASH' ||
-       !exists($data->{PicklistValues}->{PickListValue}) || ref($data->{PicklistValues}->{PickListValue}) ne 'ARRAY') {
-      return ();
-    }
-
-    my %pick_list;
-    foreach my $value (@{$data->{PicklistValues}->{PickListValue}}) {
-      $pick_list{$value->{Label}} = $value->{Value};
-    }
-
-    $self->picklist_values->{$entity}->{$field} = \%pick_list;
-  }
-
-  return %{$self->picklist_values->{$entity}->{$field}};
+  return $picklist;
 }
 
-sub get_threshold_and_usage_info {
-  shift->{_at_soap}->getThresholdAndUsageInfo->result;
-}
+sub get_threshold_and_usage_info { return shift->{_at_soap}->getThresholdAndUsageInfo->result }
 
-sub get_zone_info {
-  my $self = shift;
-  $self->{_at_soap}->getZoneInfo(SOAP::Data->value($self->username)->name('UserName'))->result;
-}
+sub get_zone_info { $_[0]->{_at_soap}->getZoneInfo(SOAP::Data->value(shift->username)->name('UserName'))->result }
 
 sub new { shift->SUPER::new(@_)->_init_soap }
 
@@ -500,7 +425,7 @@ sub _init_soap {
   $self->{error} = '';
 
   # Check that we are using the right SOAP proxy.
-  my $res = $cache->expires(86_400 * 30)->get_zone_info;
+  my $res = $self->cache->get_zone_info;
   if ($res->{Error} || $res->{ErrorCode}) {
     die sprintf "Could not find correct Autotask Proxy for user: %s", $self->username;
   }
@@ -516,12 +441,12 @@ sub _init_soap {
   }
 
   # Get a list of all the entity types available.
-  $res = $cache->expires(86_400 * 30)->get_entity_info;
-  if (!exists($res->{EntityInfo}) || ref($res->{EntityInfo}) ne 'ARRAY') {
+  $res = $self->cache->get_entity_info;
+  if ( ref $res ne 'ARRAY') {
     die "Unable to get a list of valid Entities from the Autotask server";
   }
-  foreach my $ent (@{$res->{EntityInfo}}) {
-    $self->valid_entities->{$ent->{Name}} = $ent;
+  foreach my $ent ( @$res ) {
+    $self->{valid_entities}->{$ent->{Name}} = $ent;
   }
 
   return $self;
@@ -788,6 +713,20 @@ a roled Mojo::Collection instance of L</"cache">.
 L<Mojo::Autotask::ExecuteCommand> object used to build Autotask ExecuteCommand
 URLs.
 
+=head2 entity_info
+
+  my $collection = $at->entity_info;
+  $at            = $at->entity_info(Mojo::Collection);
+
+A L<Mojo::Collection> of entity info.
+
+=head2 field_info
+
+  my $hash = $at->field_info;
+  $at      = $at->field_info({});
+
+A hash ref of L<Mojo::Collection> objects of entity field info.
+
 =head2 limits
 
   my $limits = $at->limites;
@@ -843,6 +782,13 @@ default one of the proxies is used and then the correct proxy is determined
 after logging in. If the default proxy is not correct the correct proxy will
 then be logged into automatically. This option should not be required.
 
+=head2 threshold_and_usage_info
+
+  my $tui = $at->tui;
+  $at     = $at->tui({})
+
+XXXXXXXXXXX
+
 =head2 username
 
   my $username = $at->username;
@@ -862,6 +808,13 @@ auditing within Autotask to know which application took what action.
 
 The L<Mojo::URL> object for the Autotask WebServices API SOAP URL.
 Defaults to http://autotask.net/ATWS/v1_5/.
+
+=head2 zone_info
+
+  my $zi = $at->zone_info;
+  $at    = $at->zone_info({});
+
+XXXXXXXX
 
 =head1 METHODS
 
@@ -1038,18 +991,16 @@ were created successfully. If an error occurs $@ will be set and undef is
 returned. See the section on Entity format for more details on how to format
 entities to be accepted by this method.
 
-=head2 get_picklist_options($entity, $field)
-
-Return a hash that contains the ID values and options for a picklist field
-item. If the field is not a picklist field then an empty hash will be
-retruned. The hash is formated with the labels as keys and the values as the
-values.
-
 =head2 create_attachment($attach)
 
 Create a new attachment. Takes a hashref containing Data (the raw data of
 the attachment) and Info, which contains the AttachmentInfo. Returns the
 new attachment ID on success.
+
+=head2 delete_attachment($id)
+
+Delete an attachment; the only argument is the attachment ID. Returns true on
+success or sets the error string on failure.
 
 =head2 get_attachment($id)
 
@@ -1057,10 +1008,56 @@ Fetch an attachment; the only argument is the attachment ID. Returns a
 hashref of attachment Data and Info, or undef if the specified attachment
 doesn't exist or if there is an error.
 
-=head2 delete_attachment($id)
+=head2 get_entity_info
 
-Delete an attachment; the only argument is the attachment ID. Returns true on
-success or sets the error string on failure.
+  my $collection = $at->get_entity_info
+
+Return a L<Mojo::Collection> that contains the ID values and options for a
+
+=head2 get_entity_info_c
+
+  my $collection = $at->get_entity_info_c
+
+XXXXXXXXXXXX
+
+=head2 get_field_info
+
+  my $collection = $at->get_field_info($entity)
+  my $collection = $at->get_field_info($entity, $field)
+
+Return a L<Mojo::Collection> that contains the ID values and options for a
+
+=head2 get_field_info_c
+
+  my $collection = $at->get_field_info_c($entity)
+  my $collection = $at->get_field_info_c($entity, $field)
+
+XXXXXXXXXXXXXXXX
+
+=head2 get_picklist_options
+
+  my $collection = $at->get_picklist_options($entity, $field)
+  my $collection = $at->get_picklist_options($entity, $field, $key)
+  my $collection = $at->get_picklist_options($entity, $field, $key, $value)
+
+Return a L<Mojo::Collection> that contains the ID values and options for a
+picklist field item. If the field is not a picklist field then an empty hash
+will be retruned. The hash is formated with the labels as keys and the values
+as the values.
+
+=head2 get_threshold_and_usage_info
+
+  my $collection = $at->get_field_info($entity)
+  my $collection = $at->get_field_info($entity, $field)
+
+XXXXXXXXXXX
+
+=head2 get_zone_info
+
+  my $collection = $at->get_field_info($entity)
+  my $collection = $at->get_field_info($entity, $field)
+
+XXXXXXXXXXXXX
 
 =head1 ENTITY FORMAT
 
