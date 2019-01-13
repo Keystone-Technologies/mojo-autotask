@@ -57,6 +57,16 @@ has max_records => 2_500;
 has password => sub { die "No password provided" };
 has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.5/atws.asmx') };
 has threshold_and_usage_info => sub { shift->cache->get_threshold_and_usage_info };
+has udf_info => sub {
+  my $self = shift;
+  my $fields = {};
+  my $entity_info = $self->entity_info;
+  foreach ( @$entity_info ) {
+    my $entity = $_->{Name};
+    $fields->{$entity} = $self->cache->get_udf_info($entity);
+  }
+  return $fields;
+};
 has username => sub { die "No username provided" };
 has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_5/') };
 has zone_info => sub { shift->cache->get_zone_info };
@@ -189,7 +199,10 @@ sub get_attachment {
 }
 
 
-sub get_entity_info { shift->{_at_soap}->GetEntityInfo->result->{EntityInfo} }
+sub get_entity_info {
+  my $entity_info = shift->{_at_soap}->GetEntityInfo->result->{EntityInfo};
+  return $entity_info ? $entity_info->{EntityInfo} : [];
+}
 
 sub get_entity_info_c {
   my ($self, $entity) = @_;
@@ -197,7 +210,10 @@ sub get_entity_info_c {
   return $entity ? $entity_info->grep(sub{$_->{Name} eq $entity}) : $entity_info;
 }
 
-sub get_field_info { shift->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift))->result->{Field} }
+sub get_field_info {
+  my $field_info = shift->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift))->result;
+  return $field_info ? $field_info->{Field} : [];
+}
 
 sub get_field_info_c {
   my ($self, $entity, $field) = @_;
@@ -209,7 +225,7 @@ sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die "missing entity" unless $entity;
   die "missing field" unless $field;
-  my $picklist = $self->get_field_info($entity, $field)->map(sub{$_->{PickList}})->first;
+  my $picklist = $self->get_field_info_c($entity, $field)->map(sub{$_->{PickList}})->first;
   return '' unless $picklist;
   if ( $kv && defined $vk ) {
     my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
@@ -218,9 +234,20 @@ sub get_picklist_options {
   return $picklist;
 }
 
-sub get_threshold_and_usage_info { return shift->{_at_soap}->getThresholdAndUsageInfo->result }
+sub get_threshold_and_usage_info { return shift->{_at_soap}->getThresholdAndUsageInfo->result || {} }
 
-sub get_zone_info { $_[0]->{_at_soap}->getZoneInfo(SOAP::Data->value(shift->username)->name('UserName'))->result }
+sub get_udf_info {
+  my $udf_info = shift->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value(shift))->result;
+  return $udf_info ? $udf_info->{Field} : [];
+}
+
+sub get_udf_info_c {
+  my ($self, $entity, $field) = @_;
+  my $udf_info = $self->cache_c->as->new(@{$self->udf_info->{$entity}});
+  return $field ? $udf_info->grep(sub{$_->{Name} eq $field}) : $udf_info;
+}
+
+sub get_zone_info { $_[0]->{_at_soap}->getZoneInfo(SOAP::Data->value(shift->username)->name('UserName'))->result || {} }
 
 sub new { shift->SUPER::new(@_)->_init_soap }
 
@@ -425,7 +452,7 @@ sub _init_soap {
   $self->{error} = '';
 
   # Check that we are using the right SOAP proxy.
-  my $res = $self->cache->get_zone_info;
+  my $res = $cache->get_zone_info;
   if ($res->{Error} || $res->{ErrorCode}) {
     die sprintf "Could not find correct Autotask Proxy for user: %s", $self->username;
   }
@@ -441,12 +468,12 @@ sub _init_soap {
   }
 
   # Get a list of all the entity types available.
-  $res = $self->cache->get_entity_info;
+  $res = $cache->get_entity_info;
   if ( ref $res ne 'ARRAY') {
     die "Unable to get a list of valid Entities from the Autotask server";
   }
   foreach my $ent ( @$res ) {
-    $self->{valid_entities}->{$ent->{Name}} = $ent;
+    $self->valid_entities->{$ent->{Name}} = $ent;
   }
 
   return $self;
@@ -462,18 +489,27 @@ sub _load_entity_field_info {
   my $soap = $self->{_at_soap};
 
   # Now load the fields.
-  my $res = $soap->GetFieldInfo(SOAP::Data->name('psObjectType')->value($entity))->result;
-  foreach my $field (@{$res->{Field}}) {
+  #my $res = $soap->GetFieldInfo(SOAP::Data->name('psObjectType')->value($entity))->result;
+  #foreach my $field (@{$res->{Field}}) {
+  #  $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
+  #}
+  my $res = $self->cache->get_field_info($entity);
+  foreach my $field ( @$res ) {
     $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
   }
 
   # Now load the user derfined fields.
-  $res = $soap->getUDFInfo(SOAP::Data->name('psTable')->value($entity))->result;
-  if ($res && ref($res) eq 'HASH' && exists($res->{Field}) && ref($res->{Field}) eq 'ARRAY') {
-    foreach my $field (@{$res->{Field}}) {
-      $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
-      $self->valid_entities->{$entity}->{fields}->{$field->{Name}}->{IsUDF} = 'true';
-    }
+  #$res = $soap->getUDFInfo(SOAP::Data->name('psTable')->value($entity))->result;
+  #if ($res && ref($res) eq 'HASH' && exists($res->{Field}) && ref($res->{Field}) eq 'ARRAY') {
+  #  foreach my $field (@{$res->{Field}}) {
+  #    $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
+  #    $self->valid_entities->{$entity}->{fields}->{$field->{Name}}->{IsUDF} = 'true';
+  #  }
+  #}
+  $res = $self->cache->get_udf_info($entity);
+  foreach my $field ( @$res ) {
+    $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
+    $self->valid_entities->{$entity}->{fields}->{$field->{Name}}->{IsUDF} = 'true';
   }
 
   return;
@@ -784,8 +820,15 @@ then be logged into automatically. This option should not be required.
 
 =head2 threshold_and_usage_info
 
-  my $tui = $at->tui;
-  $at     = $at->tui({})
+  my $tui = $at->threshold_and_usage_info;
+  $at     = $at->threshold_and_usage_info({})
+
+XXXXXXXXXXX
+
+=head2 udf_info
+
+  my $udf_info = $at->udf_info;
+  $at          = $at->udf_info({})
 
 XXXXXXXXXXX
 
@@ -950,37 +993,6 @@ updated successfully. If an error occurs $@ will be set and undef is returned.
 See the section on Entity format for more details on how to format entities to
 be accepted by this method.
 
-sub update {
-	my ($self, @entities) = @_;
-
-	die "Missing entity argument in call to query" if (!@entities);
-
-	# Validate that we have the right arguments.
-	my @list;
-	foreach my $ent (@entities) {
-		$self->_validate_entity_argument($ent, 'update');
-
-		# Get the entity information if we don't already have it.
-		$self->_load_entity_field_info(blessed($ent));
-
-		# Verify all fields provided are valid.
-		$self->_validate_fields($ent);
-
-		push(@list, _entity_as_soap_data($ent));
-	}
-
-	my $soap = $self->{at_soap};
-	my $res = $soap->update(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)))->result;
-
-	if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-		# There were errors. Grab the errors and set $@ to their textual values.
-		$self->_set_error($res->{Errors}->{ATWSError});
-		return undef;
-	}
-
-	return _get_entity_results($res);
-}
-
 =head2 create(@entities)
 
 Create the given entities. Entites will be verified prior to submitted to
@@ -1046,6 +1058,20 @@ will be retruned. The hash is formated with the labels as keys and the values
 as the values.
 
 =head2 get_threshold_and_usage_info
+
+  my $collection = $at->get_field_info($entity)
+  my $collection = $at->get_field_info($entity, $field)
+
+XXXXXXXXXXX
+
+=head2 get_udf_info
+
+  my $collection = $at->get_field_info($entity)
+  my $collection = $at->get_field_info($entity, $field)
+
+XXXXXXXXXXX
+
+=head2 get_udf_info_c
 
   my $collection = $at->get_field_info($entity)
   my $collection = $at->get_field_info($entity, $field)
