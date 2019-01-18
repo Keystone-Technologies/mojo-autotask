@@ -27,30 +27,36 @@ sub expand {
     });
     $_ = $record;
   })->map(sub {
-    foreach my $arg ( @args ) {
-      if ( ref $arg eq 'ARRAY' || ! ref $arg ) {
-        foreach my $col ( ref $arg ? @$arg : $arg ) {
-          last unless $col;
-          $col.='_ref' unless $col =~ /_ref$/;
-          next unless $_->{$col};
-          my ($entity, $id) = split /:/, $_->{$col};
-          next unless $entity && defined $id;
-          $data->{$entity} ||= $at->cache_c->query($entity)->hashify('id');
-          foreach my $l ( keys %{$data->{$entity}->{$id}} ) {
-            $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
-          }
+    # $at->query()->expand($at, [qw/a b c/]);
+    # $at->query()->expand($at, 'a');
+    foreach my $arg ( grep { !ref $_ || ref $_ eq 'ARRAY' } @args ) {
+      foreach my $col ( ref $arg ? @$arg : $arg ) {
+        last unless $col;
+        $col.='_ref' unless $col =~ /_ref$/;
+        next unless $_->{$col};
+        my ($entity, $id) = split /:/, $_->{$col};
+        next unless $entity && defined $id;
+        $data->{$entity} ||= $at->cache_c->query($entity)->hashify('id');
+        foreach my $l ( keys %{$data->{$entity}->{$id}} ) {
+          $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
         }
-      } elsif ( ref $arg eq 'HASH' ) {
-        while ( my ($col, $options) = each %$arg ) {
-          last unless $col;
-          $col.='_ref' unless $col =~ /_ref$/;
-          next unless $_->{$col};
-          my ($entity, $id) = split /:/, $_->{$col};
-          next unless $entity && defined $id;
-          $data->{$entity} ||= $at->cache_c->query($entity, grep { ref eq 'HASH' } ref $options eq 'ARRAY' ? @$options : $options)->hashify('id');
-          foreach my $l ( (grep { ref eq 'ARRAY' || ! ref } ref $options eq 'ARRAY' ? @$options : $options) || keys %{$data->{$entity}->{$id}} ) {
-            $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
-          }
+      }
+    }
+    # $at->query()->expand($at, {a => 'a1'});
+    # $at->query()->expand($at, {a => {}});
+    # $at->query()->expand($at, {a => [qw/a b c/, {}]});
+    foreach my $arg ( grep { ref $_ eq 'HASH' } @args ) {
+      while ( my ($col, $options) = each %$arg ) {
+        last unless $col;
+        $col.='_ref' unless $col =~ /_ref$/;
+        next unless $_->{$col};
+        my ($entity, $id) = split /:/, $_->{$col};
+        next unless $entity && defined $id;
+        my @query = grep { ref eq 'HASH' } ref $options eq 'ARRAY' ? @$options : $options;
+        $data->{$entity} ||= $at->cache_c->query($entity, @query ? [@query] : () )->hashify('id');
+        my @lookup = grep { ref eq 'ARRAY' || ! ref } ref $options eq 'ARRAY' ? @$options : $options;
+        foreach my $l ( @lookup ) {
+          $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
         }
       }
     }

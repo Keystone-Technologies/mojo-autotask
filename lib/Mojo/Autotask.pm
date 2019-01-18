@@ -24,6 +24,8 @@ use Scalar::Util qw(blessed);
 use MIME::Base64;
 use Encode;
 
+use constant DEBUG => $ENV{MOJO_AUTOTASK_DEBUG} || 0;
+
 use vars qw($VERSION);
 $VERSION = '0.01';
 
@@ -36,11 +38,11 @@ my @VALID_OPS = qw(
 my @VALID_CONDITIONS = qw(AND OR);
 
 has cache => sub { Mojo::Recache->new(app => shift) };
-has cache_c => sub {
-  shift->cache->as(Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Expand')->new);
-};
+has cached => 0;
+has collection => sub { Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Expand')->new };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
 has entity_info => sub { shift->cache->get_entity_info };
+has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory, %{$_[0]->limits} } };
 has field_info => sub {
   my $self = shift;
   my $fields = {};
@@ -55,8 +57,9 @@ has limits => sub { Mojo::Autotask::Limits->new };
 has max_memory => 250_000;
 has max_records => 2_500;
 has password => sub { die "No password provided" };
-has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.5/atws.asmx') };
+has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
 has threshold_and_usage_info => sub { shift->cache->get_threshold_and_usage_info };
+has tracking_id => sub { die "No tracking_id provided" };
 has udf_info => sub {
   my $self = shift;
   my $fields = {};
@@ -68,7 +71,7 @@ has udf_info => sub {
   return $fields;
 };
 has username => sub { die "No username provided" };
-has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_5/') };
+has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
 has zone_info => sub { shift->cache->get_zone_info };
 
 has valid_entities => sub { {} };
@@ -102,7 +105,7 @@ sub create {
   }
 
   my $soap = $self->{_at_soap};
-  my $res = $soap->create(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)))->result;
+  my $res = $soap->create(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
 
   if ($res->{Errors} || $res->{ReturnCode} ne '1') {
     # There were errors. Grab the errors and set $@ to their textual values.
@@ -136,7 +139,7 @@ sub create_attachment {
     SOAP::Data->name("attachment" => \SOAP::Data->value(
     SOAP::Data->name(Info => \SOAP::Data->value(@inf))->attr({'xsi:type' => $ati}),
     SOAP::Data->name('Data')->value($data)->type('base64Binary'),
-  ))->attr({'xsi:type' => $atb}));
+  ), $self->{_soap_tracking})->attr({'xsi:type' => $atb}));
   return $res->valueof('//CreateAttachmentResponse/CreateAttachmentResult');
 }
 
@@ -162,7 +165,7 @@ sub delete {
   }
 
   my $soap = $self->{_at_soap};
-  my $res = $soap->delete(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)))->result;
+  my $res = $soap->delete(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
 
   if ($res->{Errors} || $res->{ReturnCode} ne '1') {
     # There were errors. Grab the errors and set $@ to their textual values.
@@ -177,7 +180,7 @@ sub delete_attachment {
   my ($self, $id) = @_;
 
   my $soap = $self->{_at_soap};
-  my $res = $soap->DeleteAttachment(SOAP::Data->name('attachmentId')->value($id))->result;
+  my $res = $soap->DeleteAttachment(SOAP::Data->name('attachmentId')->value($id), $self->{_soap_tracking})->result;
   if ($res) {
     $self->_set_error($res);
     return 0;
@@ -190,7 +193,7 @@ sub get_attachment {
 
   # The result is either a hashref with Data and Info or undef
   my $soap = $self->{_at_soap};
-  my $res = $soap->GetAttachment(SOAP::Data->name('attachmentId')->value($id))->result;
+  my $res = $soap->GetAttachment(SOAP::Data->name('attachmentId')->value($id), $self->{_soap_tracking})->result;
   if ($res && %$res && $$res{Data}) {
     # Go ahead and decode it
     $$res{Data} = decode_base64($$res{Data});
@@ -198,26 +201,27 @@ sub get_attachment {
   return $res;
 }
 
-
 sub get_entity_info {
-  my $entity_info = shift->{_at_soap}->GetEntityInfo->result->{EntityInfo};
+  my $self = shift;
+  my $entity_info = $self->{_at_soap}->GetEntityInfo($self->{_soap_tracking})->result;
   return $entity_info ? $entity_info->{EntityInfo} : [];
 }
 
 sub get_entity_info_c {
   my ($self, $entity) = @_;
-  my $entity_info = $self->cache_c->as->new(@{$self->entity_info});
+  my $entity_info = $self->collection->new(@{$self->entity_info});
   return $entity ? $entity_info->grep(sub{$_->{Name} eq $entity}) : $entity_info;
 }
 
 sub get_field_info {
-  my $field_info = shift->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift))->result;
+  my $self = shift;
+  my $field_info = $self->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift), $self->{_soap_tracking})->result;
   return $field_info ? $field_info->{Field} : [];
 }
 
 sub get_field_info_c {
   my ($self, $entity, $field) = @_;
-  my $field_info = $self->cache_c->as->new(@{$self->field_info->{$entity}});
+  my $field_info = $self->collection->new(@{$self->field_info->{$entity}});
   return $field ? $field_info->grep(sub{$_->{Name} eq $field}) : $field_info;
 }
 
@@ -234,28 +238,34 @@ sub get_picklist_options {
   return $picklist;
 }
 
-sub get_threshold_and_usage_info { return shift->{_at_soap}->getThresholdAndUsageInfo->result || {} }
+sub get_threshold_and_usage_info {
+  my $self = shift;
+  return $self->{_at_soap}->getThresholdAndUsageInfo($self->{_soap_tracking})->result || {};
+}
 
 sub get_udf_info {
-  my $udf_info = shift->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value(shift))->result;
+  my $self = shift;
+  my $udf_info = $self->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value(shift), $self->{_soap_tracking})->result;
   return $udf_info ? $udf_info->{Field} : [];
 }
 
 sub get_udf_info_c {
   my ($self, $entity, $field) = @_;
-  my $udf_info = $self->cache_c->as->new(@{$self->udf_info->{$entity}});
+  my $udf_info = $self->collection->new(@{$self->udf_info->{$entity}});
   return $field ? $udf_info->grep(sub{$_->{Name} eq $field}) : $udf_info;
 }
 
-sub get_zone_info { $_[0]->{_at_soap}->getZoneInfo(SOAP::Data->value(shift->username)->name('UserName'))->result || {} }
+sub get_zone_info {
+  my $self = shift;
+  $self->{_at_soap}->getZoneInfo(SOAP::Data->value($self->username)->name('UserName'), $self->{_soap_tracking})->result || {};
+}
 
 sub new { shift->SUPER::new(@_)->_init_soap }
 
 # LOW: Better logging and messaging
 sub query {
   my $self = shift;
-  my @args = @_;
-  my ($entity, $query, $max_records, $limits) = (shift, shift || [], shift || $self->max_records, shift || $self->limits);
+  my ($entity, $query) = (shift, shift || []);
 
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($entity, 'query');
@@ -265,14 +275,15 @@ sub query {
   $self->_load_entity_field_info($entity);
 
   my $cache = $self->cache;
-  my $name = $cache->name(query => \@args);
-  my $short = $cache->short($name);
-  my $data = $cache->retrieve($name);
-  $data = [] unless ref $data eq 'ARRAY';
-  $data = {map { $_->{id} => $_ } @$data};
-  my @since = $self->limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_}));
-  my @limits = $limits->limit($entity) if blessed($limits) && $limits->isa('Mojo::Autotask::Limits');
+  my $name = $self->cached ? $cache->name(query => $entity, $query) : undef;
+  my $short = $self->cached ? $cache->short($name) : '-'x6;
+  my $data = $self->cached ? $cache->retrieve($name) : [];
+  my $limits = $self->limits;
+  my @limits = $limits->limit($entity);
+  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
+
   my $last_id = 0;
+  $data = {map { $_->{id} => $_ } @$data};
 
   my $mu = Memory::Usage->new();
   $mu->record('init');
@@ -288,11 +299,11 @@ sub query {
       @$query,
     ];
 
-    #warn dumper($_query);
+    warn dumper($_query) if DEBUG;
     my $query_xml = $self->_create_query_xml($entity, $_query);
 
     my $soap = $self->{_at_soap};
-    my $res = $soap->query(SOAP::Data->value($query_xml)->name('sXML'))->result;
+    my $res = $soap->query(SOAP::Data->value($query_xml)->name('sXML'), $self->{_soap_tracking})->result;
     if ($res->{Errors} || $res->{ReturnCode} ne '1') {
       # There were errors. Grab the errors and set $@ to their textual values.
       $self->_set_error($res->{Errors}->{ATWSError});
@@ -301,22 +312,22 @@ sub query {
 
     my @at = _get_entity_results($res);
     my $fetched = scalar @at;
-    $cache->log->debug(sprintf '[%s] Fetched %s results', $short, $fetched);
+    warn sprintf '[%s] Fetched %s results', $short, $fetched if DEBUG;
     last unless $fetched;
     $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
-    $cache->log->debug(sprintf '[%s] Kept %s results', $short, scalar @at);
-    $cache->log->debug(sprintf '[%s] %s', $short, "Last ID: $last_id");
-    $cache->log->debug(sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data);
-    warn sprintf "%s records, %s memory", scalar keys %$data, total_size($data);
+    warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
+    warn sprintf '[%s] %s', $short, "Last ID: $last_id" if DEBUG;
+    warn sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data if DEBUG;
+    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data);
     #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
     $data = {%$data, map { $_->{id} => $_ } @at};
-    warn sprintf "%s records, %s memory", scalar keys %$data, total_size($data);
+    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;
     $mu->record(scalar keys %$data);
-    $cache->log->debug(sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1]);
+    warn sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $self->max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1] if DEBUG;
     #$mu->dump;
-    last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
+    last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $self->max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
   }
-  return [values %$data];
+  return $self->collection->new(values %$data);
 }
 
 sub update {
@@ -339,7 +350,7 @@ sub update {
   }
 
   my $soap = $self->{_at_soap};
-  my $res = $soap->update(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)))->result;
+  my $res = $soap->update(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
 
   if ($res->{Errors} || $res->{ReturnCode} ne '1') {
     # There were errors. Grab the errors and set $@ to their textual values.
@@ -449,6 +460,7 @@ sub _init_soap {
       credentials => [
         "$site:443", $site, $self->username => $self->password
       ]);
+  $self->{_soap_tracking} = SOAP::Header->attr({xmlns => $self->ws_url->to_string})->value(\SOAP::Data->value($self->tracking_id)->name('IntegrationCode'))->name('AutotaskIntegrations');
   $self->{error} = '';
 
   # Check that we are using the right SOAP proxy.
@@ -680,24 +692,25 @@ sub _validate_fields {
 
 =head1 NAME
 
-Mojo::Autotask - Interface to the Autotask WebServices SOAP API and
+Mojo::Autotask - Interface to the Autotask WebServices SOAP API 1.6 and
 ExecuteCommand URL builder.
 
 =head1 SYNOPSIS
 
   my $at = Mojo::Autotask->new(
     username => 'user@autotask.account.com',
-    password => 'some_password'
+    password => 'some_password',
+    tracking_id => 'JJLKJE2983LJOL2KLJ',
   );
 
-  my $list = $at->query(Account => query => [
+  my $collection = $at->query(Account => [
     {
       name => 'AccountName',
       expressions => [{op => 'BeginsWith', value => 'b'}]
     },
   ]);
 
-  $list->[0]->{AccountName} = 'New Account Name';
+  $collection->first->{AccountName} = 'New Account Name';
 
   $at->update(@$list);
 
@@ -713,10 +726,10 @@ ExecuteCommand URL builder.
 =head1 DESCRIPTION
 
 L<Mojo::Autotask> is a module that provides an interface to the Autotask
-WebServices SOAP API and ExecuteCommand URL builder. Using this method and your
-Autotask login credentials you can access and manage your Autotask items using
-this interface. You should read the Autotask L<WebServices SOAP-based API
-documentation|https://ww5.autotask.net/help/Content/LinkedDOCUMENTS/WSAPI/T_WebServicesAPIv1_5.pdf>
+WebServices SOAP API 1.6 and ExecuteCommand URL builder. Using this method and
+your Autotask login credentials you can access and manage your Autotask items
+using this interface. You should read the Autotask L<WebServices SOAP-based API
+documentation|https://ww5.autotask.net/help/Content/LinkedDOCUMENTS/WSAPI/T_WebServicesAPIv1_6.pdf>
 and L<ExecuteCommand URL builder documentation|https://ww5.autotask.net/help/Content/LinkedDOCUMENTS/PDFBatchOutput/ExecuteCommandAPI.pdf>
 prior to using this module.
 
@@ -740,6 +753,13 @@ L<Mojo::Recache> object used to cache slow queries from Autotask.
 
 L<Mojo::Recache> object used to cache slow queries from Autotask. Defaults to
 a roled Mojo::Collection instance of L</"cache">.
+
+=head2 collection
+
+  my $collection = $at->collection;
+  $at            = $at->collection(Mojo::Collection->new);
+
+The default L<Mojo::Collection> object to use for storing data.
 
 =head2 ec
 
@@ -831,6 +851,20 @@ XXXXXXXXXXX
   $at          = $at->udf_info({})
 
 XXXXXXXXXXX
+
+=head2 tracking_id
+
+  my $tracking_id = $at->tracking_id;
+  $at             = $at->tracking_id('AKJHADLK7658KJH78');
+
+Autotask WebServices API tracking id. This attribute is required and has no
+default value.
+
+It is recommended to create a new API-only Autotask account for each
+application. This limits the effect of password breaches as well as enables
+auditing within Autotask to know which application took what action. The
+tracking id is a new attribute required with version 1.6 of the Web Services
+API.
 
 =head2 username
 
