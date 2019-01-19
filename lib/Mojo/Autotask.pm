@@ -41,6 +41,7 @@ has collection => sub {
     +UtilsBy
     +Hashes
     Mojo::Autotask::Role::Expand
+    Mojo::Autotask::Role::Tablify
   /)->new
 };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
@@ -500,7 +501,7 @@ sub _read {
     warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
     warn sprintf '[%s] Last ID: %s', $short, $last_id if DEBUG;
     warn sprintf '[%s] Expanding %s dataset and merging into %d existing records', $short, $entity, scalar keys %$data if DEBUG;
-    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data);
+    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data) if DEBUG;
     #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
     $data = {%$data, map { $_->{id} => $_ } @at};
     warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;
