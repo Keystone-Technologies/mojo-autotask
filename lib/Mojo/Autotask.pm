@@ -790,8 +790,15 @@ bytes.
 
 Autotask WebServices API returns a maximum of 500 records per fetch;
 L<Mojo::Autotask> automatically continues to make additional fetches, capturing
-an additional 500 records per fetch, for a maximum collection of L</"max_records">
-records. Defaults to 2,500.
+an additional 500 records per fetch, for a maximum collection of
+L</"max_records"> records. Defaults to 2,500.
+
+=head2 new
+
+  my $at = Mojo::Autotask->new;
+
+Create a new instance and initialize by determining the appropriate zone for the
+supplied L</"username">.
 
 =head2 password
 
