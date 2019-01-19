@@ -42,7 +42,8 @@ has cached => 0;
 has collection => sub { Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Expand')->new };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
 has entity_info => sub { shift->cache->get_entity_info };
-has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory, %{$_[0]->limits} } };
+#has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory, %{$_[0]->limits} } };
+has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory } };
 has field_info => sub {
   my $self = shift;
   my $fields = {};
@@ -265,22 +266,26 @@ sub new { shift->SUPER::new(@_)->_init_soap }
 # LOW: Better logging and messaging
 sub query {
   my $self = shift;
-  my ($entity, $query) = (shift, shift || []);
+
+  my $cache = $self->cache;
+  my $name = $self->cached ? $cache->name(query => @_) : undef;
+  my $short = $self->cached ? $cache->short($name) : '-'x6;
+  my $data = $self->cached ? $cache->retrieve($name) : [];
+
+  my ($el, $query) = (shift, shift);
+  my ($entity, $entity_limit) = ref $el eq 'HASH' ? (each %$el) : ($el);
+
+  my $limits = $self->limits->new($entity => $entity_limit // $self->limits->$entity);
+  my @limits = $limits->limit($entity);
+  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
 
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($entity, 'query');
+  $query ||= [];
   die "Missing query argument in call to query" unless ref $query eq 'ARRAY';
 
   # Get the entity information if we don't already have it.
   $self->_load_entity_field_info($entity);
-
-  my $cache = $self->cache;
-  my $name = $self->cached ? $cache->name(query => $entity, $query) : undef;
-  my $short = $self->cached ? $cache->short($name) : '-'x6;
-  my $data = $self->cached ? $cache->retrieve($name) : [];
-  my $limits = $self->limits;
-  my @limits = $limits->limit($entity);
-  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
 
   my $last_id = 0;
   $data = {map { $_->{id} => $_ } @$data};
@@ -316,9 +321,9 @@ sub query {
     last unless $fetched;
     $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
     warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
-    warn sprintf '[%s] %s', $short, "Last ID: $last_id" if DEBUG;
-    warn sprintf "[%s] Expanding $entity dataset and merging into %d existing records", $short, scalar keys %$data if DEBUG;
-    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data);
+    warn sprintf '[%s] Last ID: %s', $short, $last_id if DEBUG;
+    warn sprintf '[%s] Expanding %s dataset and merging into %d existing records', $short, $entity, scalar keys %$data if DEBUG;
+    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data);
     #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
     $data = {%$data, map { $_->{id} => $_ } @at};
     warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;

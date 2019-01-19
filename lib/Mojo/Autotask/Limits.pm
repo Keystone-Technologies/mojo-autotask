@@ -111,6 +111,11 @@ sub limit {
   );
 }
 
+sub new {
+  my $self = shift;
+  $self->SUPER::new((ref $self ? %$self : ()), @_);
+}
+
 sub since {
   my ($self, $entity, $t) = @_;
   return () unless blessed($t) && $t->isa('Time::Piece');
