@@ -56,8 +56,82 @@ sub AUTOLOAD {
 
 1;
 
-=head1 NAME
+=encoding utf8
+
+=head1 NAME 
 
 Mojo::Autotask::ExecuteCommand - Mojo interface to the Autotask ExecuteCommand API
+
+=head1 SYNOPSIS
+
+  my $ec = Mojo::Autotask::ExecuteCommand->new;
+  say $ec->open_ticket_detail(TicketID => 12345);
+
+=head1 DESCRIPTION
+
+The L<Autotask ExecuteCommand API|https://www.autotask.net/help/Content/AdminSetup/2ExtensionsIntegrations/APIs/ExecuteCommand/UsingExecuteCommandAPI.htm>
+is used to build URLs for sharing, enabling recipients to click on to have
+direct access to a very specific window of data in Autotask. Of course, the
+resource, as it is an Autotask resource, is protected by normal Autotask
+authentication and authorization.
+
+=head1 EVENTS
+
+L<Mojo::Autotask::ExecuteCommand> inherits all events from
+L<Mojo::EventEmitter> and can emit the following new ones.
+
+=head2 ec
+
+  $ec->on(ec => sub {
+    my ($ec, $url) = @_;
+    ...
+  });
+
+Emitted when a new URL is built.
+
+  $ec->on(ec => sub {
+    my ($ec, $url) = @_;
+    say $url;
+  });
+
+=head1 ATTRIBUTES
+
+L<Mojo::Autotask::Limits> implements the following attributes.
+
+=head2 ec_url
+
+  $ec_url = $ec->ec_url;
+  $ec     = $ec->ec_url(Mojo::URL->new);
+
+The base URL for all Execute Command API URLs. Defaults to setting
+'/Autotask/AutotaskExtend/ExecuteCommand.aspx' as the path to L</"zone">.
+
+=head2 zone
+
+  $zone = $ec->zone;
+  $ec   = $ec->zone(Mojo::URL->new);
+
+Required. This is an Autotask account-specific URL and offers no default.
+
+=head1 METHODS
+
+=head2 AUTOLOAD
+
+  $url = $ec->code(Name => 'Value');
+
+Returns an L</"ec_url"> with the validated supplied arguments as the query.
+
+Accepts methods are L</"camelize">'d forms of valid Execute Command Codes.
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2019 Stefan Adams and others.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
+=head1 SEE ALSO
+
+L<Mojo::Autotask>
 
 =cut
