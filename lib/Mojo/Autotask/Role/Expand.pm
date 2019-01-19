@@ -75,3 +75,48 @@ sub to_date {
 }
 
 1;
+
+=encoding utf8
+
+=head1 NAME 
+
+Mojo::Autotask::Role::Expand - 
+
+=head1 SYNOPSIS
+
+  ...
+
+=head1 DESCRIPTION
+
+...
+
+=head1 METHODS
+
+=head2 expand
+
+  $collection = $collection->expand(...);
+
+...
+
+=head2 to_date
+
+  $collection = $collection->to_date($format);
+
+Expects a collection of hashes and for each key in the hash that is a
+L<Time::Piece> instance, returns a L<Time::Piece/"strftime"> formatted
+string.
+
+  $collection = $collection->to_date('%Y-%m-%dT%H:%M:%S');
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2019 Stefan Adams and others.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
+=head1 SEE ALSO
+
+L<Mojo::Autotask>
+
+=cut

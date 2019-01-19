@@ -14,3 +14,38 @@ sub tablify {
 }
 
 1;
+
+=encoding utf8
+
+=head1 NAME 
+
+Mojo::Autotask::Role::Tablify - 
+
+=head1 SYNOPSIS
+
+  ...
+
+=head1 DESCRIPTION
+
+...
+
+=head1 METHODS
+
+=head2 tablify
+
+  $collection = $collection->tablify(...);
+
+...
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2019 Stefan Adams and others.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
+=head1 SEE ALSO
+
+L<Mojo::Autotask>
+
+=cut

@@ -157,8 +157,151 @@ sub since {
 
 1;
 
-=head1 NAME
+=encoding utf8
+
+=head1 NAME 
 
 Mojo::Autotask::Limits - Build query filters for L<Mojo::Autotask>
+
+=head1 SYNOPSIS
+
+  package Mojo::Autotask;
+  use Mojo::Base -base;
+
+  use Mojo::Autotask::Limits;
+
+  has limits => sub { Mojo::Autotask::Limits->new };
+
+  package main;
+  use Mojo::Base -strict;
+
+  my $at = Mojo::Autotask->new;
+  say $at->limits->Account(13)->Account;
+  say $at->query(Account => [
+    $at->limits->grep(AccountName => BeginsWith => 'S'),
+    $at->limits->since(AccountName => BeginsWith => 'S'),
+  ]);
+=head1 DESCRIPTION
+
+
+=head1 ATTRIBUTES
+
+L<Mojo::Autotask::Limits> implements the following attributes.
+
+=head2 <Entity>
+
+  my $months = $limits->$entity;
+  $limits    = $limits->Ticket(24);
+
+Some Autotask API entities support dates and these can be used to help narrow
+the query results. L<Mojo::Autotask::Limits> defines some good defaults for
+how many months a query should be limited to. If the months is undefined then
+the entity query is not limited by date.
+
+The following Entities are defined as attributes with these defaults:
+
+=over 4
+
+=item Account => undef
+=item AccountNote => 12
+=item AccountToDo => 12
+=item Appointment => 12
+=item BillingItem => 12
+=item Contact => undef
+=item ContractCost => 48
+=item ContractMilestone => 48
+=item ContractNote => 48
+=item Currency => undef
+=item InstalledProduct => 12
+=item Invoice => 12
+=item Opportunity => 48
+=item Phase => 24
+=item Project => 24
+=item ProjectCost => 24
+=item ProjectNote => 24
+=item PurchaseOrder => 48
+=item Quote => 48
+=item QuoteTemplate => undef
+=item Service => undef
+=item ServiceBundle => undef
+=item ServiceCall => 12
+=item Task => 12
+=item TaskNote => 12
+=item Ticket => 12
+=item TicketCost => 12
+=item TicketNote => 12
+=item TimeEntry => 12
+=item UserDefinedFieldDefinition => undef
+=item UserDefinedFieldListItem => undef
+
+=back
+
+=head2 now
+
+  $now    = $limits->now;
+  $limits = $limits->now(Time::Piece->new);
+
+Set the time basis for which the query should limit the date range for queries.
+
+=head1 METHODS
+
+=head2 clone
+
+  $new_limits = $limits->clone($entity => $months);
+
+Used by L<Mojo::Autotask/"query"> to temporarily override the date range in a
+query.
+
+=head2 grep
+
+  @limit = $limits->grep([$name => $op => $value], ...);
+
+Returns a limit data structure based on the provided criteria.
+
+  @limit = $limits->grep([Account => Equals => 'Account Name'])
+  @limit = $limits->grep(
+    [Account => BeginsWith => 'A'],
+    [Account => EndsWith   => 'E'],
+  )
+
+=head2 in_list
+
+  @limit = $limits->in_list($name => $op => $value, $value, ...);
+
+Returns a limit data structure looking for any of the specified values that
+meet the $op condition of $name.
+
+  @limit = $limits->in_list(Account => BeginsWith => 'A' .. 'E');
+
+=head2 limit
+
+  @limit = $limits->limit($entity)
+
+Returns a limit data structure limiting the date range on the specified entity
+by the number of months specified by the $entity attribute.
+
+  @limit = $limits->limit('Account')
+
+=head2 since
+
+  @limit = $limits->since($entity => Time::Piece->new)
+
+Returns a limit data structure limiting the date range on the specified entity
+by returning only the items that have changed since the specified time.
+
+=head1 DEPENDENCIES
+
+L<Time::Piece>
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2019 Stefan Adams and others.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
+=head1 SEE ALSO
+
+L<Mojo::Autotask>
 
 =cut
