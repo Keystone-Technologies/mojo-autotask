@@ -807,7 +807,7 @@ supplied L</"username">.
   $at          = $at->password('secret');
 
 Autotask WebServices API password. This attribute is required and has no
-default value.
+default value. Defaults to $ENV{AUTOTASK_PASSWORD} if set.
 
 =head2 soap_proxy
 
@@ -842,13 +842,10 @@ XXXXXXXXXXX
   $at             = $at->tracking_id('AKJHADLK7658KJH78');
 
 Autotask WebServices API tracking id. This attribute is required and has no
-default value.
+default value. Defaults to $ENV{AUTOTASK_TRACKINGID} if set.
 
-It is recommended to create a new API-only Autotask account for each
-application. This limits the effect of password breaches as well as enables
-auditing within Autotask to know which application took what action. The
-tracking id is a new attribute required with version 1.6 of the Web Services
-API.
+The tracking id is a new attribute required with version 1.6 of the Web
+Services API.
 
 =head2 username
 
@@ -856,7 +853,7 @@ API.
   $at          = $at->username('user@abc.xyz');
 
 Autotask WebServices API username. This attribute is required and has no
-default value.
+default value. Defaults to $ENV{AUTOTASK_USERNAME} if set.
 
 It is recommended to create a new API-only Autotask account for each
 application. This limits the effect of password breaches as well as enables
