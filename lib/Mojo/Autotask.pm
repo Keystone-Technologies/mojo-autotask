@@ -62,14 +62,14 @@ has field_info => sub {
 has limits => sub { Mojo::Autotask::Limits->new };
 has max_memory => 250_000;
 has max_records => 2_500;
-has password => sub { die "No password provided" };
+has password => $ENV{AUTOTASK_PASSWORD} || sub { die "No password provided" };
 has soap_proxy => sub {
   Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx')
 };
 has threshold_and_usage_info => sub {
   shift->cache->get_threshold_and_usage_info
 };
-has tracking_id => sub { die "No tracking_id provided" };
+has tracking_id => $ENV{AUTOTASK_TRACKINGID} || sub { die "No tracking_id provided" };
 has udf_info => sub {
   my $self = shift;
   my $fields = {};
@@ -80,7 +80,7 @@ has udf_info => sub {
   }
   return $fields;
 };
-has username => sub { die "No username provided" };
+has username => $ENV{AUTOTASK_USERNAME} || sub { die "No username provided" };
 has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
 has zone_info => sub { shift->cache->get_zone_info };
 
