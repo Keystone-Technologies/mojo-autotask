@@ -8,9 +8,8 @@ use Mojolicious::Validator;
 use Carp;
 use Scalar::Util;
 
-has zone => sub { die };
 has ec_url => sub { shift->zone->path('/Autotask/AutotaskExtend/ExecuteCommand.aspx') };
-has api_ref => sub { Mojo::URL->new('https://www.autotask.net/help/Content/AdminSetup/2ExtensionsIntegrations/APIs/ExecuteCommand/UsingExecuteCommandAPI.htm') };
+has zone => sub { die };
 
 sub AUTOLOAD {
   my ($self, @args) = @_;
@@ -18,8 +17,6 @@ sub AUTOLOAD {
   my ($package, $method) = our $AUTOLOAD =~ /^(.+)::(.+)$/;
   Carp::croak "Undefined subroutine &${package}::$method called"
     unless Scalar::Util::blessed $self && $self->isa(__PACKAGE__);
-
-  return Mojo::URL->new($self->api_ref) if $method eq 'man';
 
   my $validator  = Mojolicious::Validator->new;
   my $v = $validator->validation;
