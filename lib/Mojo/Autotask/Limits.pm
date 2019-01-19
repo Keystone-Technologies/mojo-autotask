@@ -38,6 +38,11 @@ has TimeEntry => 12;
 has UserDefinedFieldDefinition => undef;
 has UserDefinedFieldListItem => undef;
 
+sub clone {
+  my $self = shift;
+  $self->SUPER::new((ref $self ? %$self : ()), @_);
+}
+
 sub grep {
   my $self = shift;
   return map { {name => $_->[0], expressions => [{op => $_->[1], value => $_->[2]}]} } @_;
@@ -109,11 +114,6 @@ sub limit {
     {name => $name, expressions => [{op => 'GreaterThanOrEquals', value => $now->add_months($months * -1)->strftime('%Y-%m-01T00:00:00')}]},
     {name => $name, expressions => [{op => 'LessThan', value => $now->add_months(1)->strftime('%Y-%m-01T00:00:00')}]},
   );
-}
-
-sub new {
-  my $self = shift;
-  $self->SUPER::new((ref $self ? %$self : ()), @_);
 }
 
 sub since {

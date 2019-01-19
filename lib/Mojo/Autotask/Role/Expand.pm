@@ -36,7 +36,7 @@ sub expand {
         next unless $_->{$col};
         my ($entity, $id) = split /:/, $_->{$col};
         next unless $entity && defined $id;
-        $data->{$entity} ||= $at->cache_c->query($entity)->hashify('id');
+        $data->{$entity} ||= $at->query($entity)->hashify('id');
         foreach my $l ( keys %{$data->{$entity}->{$id}} ) {
           $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
         }
@@ -53,7 +53,7 @@ sub expand {
         my ($entity, $id) = split /:/, $_->{$col};
         next unless $entity && defined $id;
         my @query = grep { ref eq 'HASH' } ref $options eq 'ARRAY' ? @$options : $options;
-        $data->{$entity} ||= $at->cache_c->query($entity, @query ? [@query] : () )->hashify('id');
+        $data->{$entity} ||= $at->query($entity, [@query])->hashify('id');
         my @lookup = grep { ref eq 'ARRAY' || ! ref } ref $options eq 'ARRAY' ? @$options : $options;
         foreach my $l ( @lookup ) {
           $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};

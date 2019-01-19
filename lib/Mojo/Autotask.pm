@@ -275,7 +275,8 @@ sub query {
   my ($el, $query) = (shift, shift);
   my ($entity, $entity_limit) = ref $el eq 'HASH' ? (each %$el) : ($el);
 
-  my $limits = $self->limits->new($entity => $entity_limit // $self->limits->$entity);
+  my $limits = $self->limits->clone;
+  $limits->$entity($entity_limit // $self->limits->$entity) if $limits->can($entity);
   my @limits = $limits->limit($entity);
   my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
 
