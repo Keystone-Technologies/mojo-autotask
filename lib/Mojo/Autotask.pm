@@ -4,15 +4,12 @@ use Mojo::Base 'Mojo::EventEmitter';
 use Mojo::Autotask::ExecuteCommand;
 use Mojo::Autotask::Limits;
 use Mojo::Collection;
-use Mojo::IOLoop;
-use Mojo::Log;
 use Mojo::Recache;
-use Mojo::Server;
 use Mojo::URL;
 use Mojo::Util qw/camelize dumper/;
-use Mojolicious::Commands;
-use Mojolicious::Plugins;
-use Mojolicious::Validator;
+#use Mojolicious::Commands;
+#use Mojolicious::Plugins;
+#use Mojolicious::Validator;
 
 use Carp;
 use Memory::Usage;
@@ -27,7 +24,7 @@ use Encode;
 use constant DEBUG => $ENV{MOJO_AUTOTASK_DEBUG} || 0;
 
 use vars qw($VERSION);
-$VERSION = '0.01';
+$VERSION = '1.60';
 
 my @VALID_OPS = qw(
   Equals NotEqual GreaterThan LessThan GreaterThanOrEquals LessThanOrEquals
@@ -39,11 +36,18 @@ my @VALID_CONDITIONS = qw(AND OR);
 
 has cache => sub { Mojo::Recache->new(app => shift) };
 has cached => 0;
-has collection => sub { Mojo::Collection->with_roles('+UtilsBy', '+Hashes', 'Mojo::Autotask::Role::Expand')->new };
+has collection => sub {
+  Mojo::Collection->with_roles(qw/
+    +UtilsBy
+    +Hashes
+    Mojo::Autotask::Role::Expand
+  /)->new
+};
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
 has entity_info => sub { shift->cache->get_entity_info };
-#has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory, %{$_[0]->limits} } };
-has extra_args => sub { sub { $_[0]->username, $_[0]->tracking_id, $_[0]->max_records, $_[0]->max_memory } };
+has extra_args => sub {
+  sub { map { $_[0]->$_ } qw/max_memory max_records tracking_id username/ }
+};
 has field_info => sub {
   my $self = shift;
   my $fields = {};
@@ -58,8 +62,12 @@ has limits => sub { Mojo::Autotask::Limits->new };
 has max_memory => 250_000;
 has max_records => 2_500;
 has password => sub { die "No password provided" };
-has soap_proxy => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
-has threshold_and_usage_info => sub { shift->cache->get_threshold_and_usage_info };
+has soap_proxy => sub {
+  Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx')
+};
+has threshold_and_usage_info => sub {
+  shift->cache->get_threshold_and_usage_info
+};
 has tracking_id => sub { die "No tracking_id provided" };
 has udf_info => sub {
   my $self = shift;
@@ -77,7 +85,10 @@ has zone_info => sub { shift->cache->get_zone_info };
 
 has valid_entities => sub { {} };
 
-has _api_records_per_query => 500;
+has _api_records_per_create => 200;
+has _api_records_per_delete => 200;
+has _api_records_per_query  => 500;
+has _api_records_per_update => 200;
 
 sub clone {
   my $self  = shift;
@@ -86,36 +97,7 @@ sub clone {
   return $clone;
 }
 
-sub create {
-  my ($self, @entities) = @_;
-
-  die "Missing entity argument in call to create" if (!@entities);
-
-  # Validate that we have the right arguments.
-  my @list;
-  foreach my $ent (@entities) {
-    $self->_validate_entity_argument($ent, 'create');
-
-    # Get the entity information if we don't already have it.
-    $self->_load_entity_field_info(blessed($ent));
-
-    # Verify all fields provided are valid.
-    $self->_validate_fields($ent);
-
-    push(@list, _entity_as_soap_data($ent));
-  }
-
-  my $soap = $self->{_at_soap};
-  my $res = $soap->create(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
-
-  if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-    # There were errors. Grab the errors and set $@ to their textual values.
-    $self->_set_error($res->{Errors}->{ATWSError});
-    return undef;
-  }
-
-  return _get_entity_results($res);
-}
+sub create { shift->_write(create => shift) }
 
 sub create_attachment {
   my ($self, $attach) = @_;
@@ -146,36 +128,7 @@ sub create_attachment {
 
 # HIGH: Test this, this is just copied from create()
 #       Need to read the API
-sub delete {
-  my ($self, @entities) = @_;
-
-  die "Missing entity argument in call to delete" if (!@entities);
-
-  # Validate that we have the right arguments.
-  my @list;
-  foreach my $ent (@entities) {
-    $self->_validate_entity_argument($ent, 'delete');
-
-    # Get the entity information if we don't already have it.
-    $self->_load_entity_field_info(blessed($ent));
-
-    # Verify all fields provided are valid.
-    $self->_validate_fields($ent);
-
-    push(@list, _entity_as_soap_data($ent));
-  }
-
-  my $soap = $self->{_at_soap};
-  my $res = $soap->delete(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
-
-  if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-    # There were errors. Grab the errors and set $@ to their textual values.
-    $self->_set_error($res->{Errors}->{ATWSError});
-    return undef;
-  }
-
-  return _get_entity_results($res);
-}
+sub delete { shift->_write(delete => shift) }
 
 sub delete_attachment {
   my ($self, $id) = @_;
@@ -263,109 +216,9 @@ sub get_zone_info {
 
 sub new { shift->SUPER::new(@_)->_init_soap }
 
-# LOW: Better logging and messaging
-sub query {
-  my $self = shift;
+sub query { shift->_read(@_) }
 
-  my $cache = $self->cache;
-  my $name = $self->cached ? $cache->name(query => @_) : undef;
-  my $short = $self->cached ? $cache->short($name) : '-'x6;
-  my $data = $self->cached ? $cache->retrieve($name) : [];
-
-  my ($el, $query) = (shift, shift);
-  my ($entity, $entity_limit) = ref $el eq 'HASH' ? (each %$el) : ($el);
-
-  my $limits = $self->limits->clone;
-  $limits->$entity($entity_limit // $self->limits->$entity) if $limits->can($entity);
-  my @limits = $limits->limit($entity);
-  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
-
-  # Validate that we have the right arguments.
-  $self->_validate_entity_argument($entity, 'query');
-  $query ||= [];
-  die "Missing query argument in call to query" unless ref $query eq 'ARRAY';
-
-  # Get the entity information if we don't already have it.
-  $self->_load_entity_field_info($entity);
-
-  my $last_id = 0;
-  $data = {map { $_->{id} => $_ } @$data};
-
-  my $mu = Memory::Usage->new();
-  $mu->record('init');
-  while ( 1 ) {
-    # We need to generate the QueryXML from the Query argument.
-    my $_query = [
-      {
-        name => 'id',
-        expressions => [{op => 'GreaterThan', value => "$last_id"}]
-      },
-      @since,
-      @limits,
-      @$query,
-    ];
-
-    warn dumper($_query) if DEBUG;
-    my $query_xml = $self->_create_query_xml($entity, $_query);
-
-    my $soap = $self->{_at_soap};
-    my $res = $soap->query(SOAP::Data->value($query_xml)->name('sXML'), $self->{_soap_tracking})->result;
-    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-      # There were errors. Grab the errors and set $@ to their textual values.
-      $self->_set_error($res->{Errors}->{ATWSError});
-      return undef;
-    }
-
-    my @at = _get_entity_results($res);
-    my $fetched = scalar @at;
-    warn sprintf '[%s] Fetched %s results', $short, $fetched if DEBUG;
-    last unless $fetched;
-    $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
-    warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
-    warn sprintf '[%s] Last ID: %s', $short, $last_id if DEBUG;
-    warn sprintf '[%s] Expanding %s dataset and merging into %d existing records', $short, $entity, scalar keys %$data if DEBUG;
-    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data);
-    #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
-    $data = {%$data, map { $_->{id} => $_ } @at};
-    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;
-    $mu->record(scalar keys %$data);
-    warn sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $self->max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1] if DEBUG;
-    #$mu->dump;
-    last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $self->max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
-  }
-  return $self->collection->new(values %$data);
-}
-
-sub update {
-  my ($self, @entities) = @_;
-
-  die "Missing entity argument in call to update" if (!@entities);
-
-  # Validate that we have the right arguments.
-  my @list;
-  foreach my $ent (@entities) {
-    $self->_validate_entity_argument($ent, 'update');
-
-    # Get the entity information if we don't already have it.
-    $self->_load_entity_field_info(blessed($ent));
-
-    # Verify all fields provided are valid.
-    $self->_validate_fields($ent);
-
-    push(@list, _entity_as_soap_data($ent));
-  }
-
-  my $soap = $self->{_at_soap};
-  my $res = $soap->update(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @list)), $self->{_soap_tracking})->result;
-
-  if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-    # There were errors. Grab the errors and set $@ to their textual values.
-    $self->_set_error($res->{Errors}->{ATWSError});
-    return undef;
-  }
-
-  return _get_entity_results($res);
-}
+sub update { shift->_write(update => shift) }
 
 ###################
 
@@ -588,6 +441,77 @@ sub _parse_field {
   return $f_elem;
 }
 
+sub _read {
+  my $self = shift;
+
+  my $cache = $self->cache;
+  my $name = $self->cached ? $cache->name(query => @_) : undef;
+  my $short = $self->cached ? $cache->short($name) : '-'x6;
+  my $data = $self->cached ? $cache->retrieve($name) : [];
+
+  my ($el, $query) = (shift, shift || []);
+  my ($entity, $entity_limit) = ref $el eq 'HASH' ? (each %$el) : ($el);
+
+  my $limits = $self->limits->clone;
+  $limits->$entity($entity_limit // $self->limits->$entity) if $limits->can($entity);
+  my @limits = $limits->limit($entity);
+  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
+
+  # Validate that we have the right arguments.
+  $self->_validate_entity_argument($entity, 'query');
+  die "Missing query argument in call to _read" unless ref $query eq 'ARRAY';
+
+  # Get the entity information if we don't already have it.
+  $self->_load_entity_field_info($entity);
+
+  my $last_id = 0;
+  $data = {map { $_->{id} => $_ } @$data};
+
+  my $mu = Memory::Usage->new();
+  $mu->record('init');
+  while ( 1 ) {
+    # We need to generate the QueryXML from the Query argument.
+    my $_query = [
+      {
+        name => 'id',
+        expressions => [{op => 'GreaterThan', value => "$last_id"}]
+      },
+      @since,
+      @limits,
+      @$query,
+    ];
+
+    warn dumper($_query) if DEBUG;
+    my $query_xml = $self->_create_query_xml($entity, $_query);
+
+    my $soap = $self->{_at_soap};
+    my $res = $soap->query(SOAP::Data->value($query_xml)->name('sXML'), $self->{_soap_tracking})->result;
+    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+      # There were errors. Grab the errors and set $@ to their textual values.
+      $self->_set_error($res->{Errors}->{ATWSError});
+      return undef;
+    }
+
+    my @at = _get_entity_results($res);
+    my $fetched = scalar @at;
+    warn sprintf '[%s] Fetched %s results', $short, $fetched if DEBUG;
+    last unless $fetched;
+    $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
+    warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
+    warn sprintf '[%s] Last ID: %s', $short, $last_id if DEBUG;
+    warn sprintf '[%s] Expanding %s dataset and merging into %d existing records', $short, $entity, scalar keys %$data if DEBUG;
+    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data);
+    #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
+    $data = {%$data, map { $_->{id} => $_ } @at};
+    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;
+    $mu->record(scalar keys %$data);
+    warn sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $self->max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1] if DEBUG;
+    #$mu->dump;
+    last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $self->max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
+  }
+  return $self->collection->new(values %$data);
+}
+
 sub _set_error {
   my ($self, $errs) = @_;
 
@@ -692,6 +616,57 @@ sub _validate_fields {
   return 1;
 }
 
+sub _write {
+  my ($self, $type, $entities) = @_;
+
+  die "Missing type argument in call to _write (create, delete, update)" unless $type && $type =~ /^(create|delete|update)$/;
+  die "Missing entity argument in call to _write" unless $entities;
+  die "Entities argument not of type Mojo::Collection" unless $entities->isa('Mojo::Collection');
+
+  my $done = $entities->new;
+  my $api_records_per = "_api_records_per_$type";
+
+  my $soap = $self->{_at_soap};
+
+  my $batch = Mojo::Collection->new;
+  my $todo  = Mojo::Collection->new;
+
+  # Validate that we have the right arguments.
+  $entities->each(sub {
+    $self->_validate_entity_argument($_, $type);
+
+    # Get the entity information if we don't already have it.
+    $self->_load_entity_field_info(blessed($_));
+
+    # Verify all fields provided are valid.
+    $self->_validate_fields($_);
+
+    # Autotask API limits how many updates can occur per update
+    # Create batches and push each full batch to the update collection
+    push @$batch, _entity_as_soap_data($_);
+    if ( $batch->size == $self->$api_records_per ) {
+      push @$todo, $batch;
+      $batch = $batch->new;
+    }
+  });
+  # Keep the final, unfilled batch
+  push @$todo, $batch if $batch->size;
+
+  $todo->each(sub {
+    my $res = $soap->$type(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @$_)), $self->{_soap_tracking})->result;
+
+    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+      # There were errors. Grab the errors and set $@ to their textual values.
+      $self->_set_error($res->{Errors}->{ATWSError});
+      return undef;
+    }
+
+    push @$done, _get_entity_results($res);
+  });
+
+  return $done;
+}
+
 1;
 
 =encoding utf8
@@ -752,13 +727,15 @@ L<Mojo::Autotask> implements the following attributes.
 
 L<Mojo::Recache> object used to cache slow queries from Autotask.
 
-=head2 cache_c
+=head2 cached
 
-  my $cache = $at->cache_c;
-  $at       = $at->cache_c(shift->cache);
+  my $bool = $at->cached;
+  $at      = $at->cached(1);
 
-L<Mojo::Recache> object used to cache slow queries from Autotask. Defaults to
-a roled Mojo::Collection instance of L</"cache">.
+L<Mojo::Recache> will set this to true so that methods of this package can know
+that they are being cached and perhaps behave differently. This is useful for
+doing cache updates of large volumes of data as opposed to doing complete
+refreshes each time.
 
 =head2 collection
 
@@ -796,13 +773,6 @@ A hash ref of L<Mojo::Collection> objects of entity field info.
 
 L<Mojo::Autotask::Limits> object used for refining the query filter.
 
-=head2 log
-
-  my $log = $at->log;
-  $at     = $at->log(Mojo::Log->new);
-
-L<Mojo::Log> object used for logging.
-
 =head2 max_memory
 
   my $max_memory = $at->max_memory;
@@ -837,7 +807,7 @@ default value.
   $at            = $at->soap_proxy(Mojo::URL->new);
 
 The L<Mojo::URL> object for the Autotask WebServices API SOAP Proxy URL.
-Defaults to https://webservices.autotask.net/atservices/1.5/atws.asmx.
+Defaults to https://webservices.autotask.net/atservices/1.6/atws.asmx.
 
 If you know which proxy server you are to use then you may supply it here. By
 default one of the proxies is used and then the correct proxy is determined
@@ -890,7 +860,7 @@ auditing within Autotask to know which application took what action.
   $at        = $at->us_url(Mojo::URL->new);
 
 The L<Mojo::URL> object for the Autotask WebServices API SOAP URL.
-Defaults to http://autotask.net/ATWS/v1_5/.
+Defaults to http://autotask.net/ATWS/v1_6/.
 
 =head2 zone_info
 
@@ -908,146 +878,42 @@ XXXXXXXX
 Clone the autotask object instance, attributes passed to clone overwrite any
 attributes set in the original instance.
 
-=head2 query(%args)
+=head2 create
 
-Generic query method to query the Autotask system for entity data. This takes
-a hash ref as its argument. If an error occurs while trying to parse the given
-arguments or creating the associated QueryXML query this method will die with
-an appropriate error. Returns either the single matching entry as a hash
-reference, or an array of hash references when more than one result is returned.
-The following keys are allowed:
-
-=over 4
-
-=item B<entity>
-
-The name of the entity you want to query for.
-
-=item B<query>
-
-An array reference of fields and conditions that are used to construct the
-query XML. See below for the definition of a field and a condition.
-
-=over 4
-
-=item B<field>
-
-A field is a hash reference that contains the following entries
-
-=over 4
-
-=item B<name>
-
-The name of the field to be querying.
-
-=item B<udf>
-
-Boolean value to indicate if this field is a user defined field or not. Only
-one UDF field is allowed per query, by default if ommited this is set to
-false.
-
-=item B<expressions>
-
-An array of hash references for the expressions to apply to this field. The
-keys for this hash refernce are:
-
-=over 4
-
-=item B<op>
-
-The operator to use. One of: Equals, NotEqual, GreaterThan, LessThan,
-GreaterThanOrEquals, LessThanOrEquals, BeginsWith, EndsWith, Contains, IsNull,
-IsNotNull, IsThisDay, Like, NotLike or SoundsLike. If not in this list an
-error will be issued.
-
-=item B<value>
-
-The appropriate value to go with the given operator.
-
-=back
-
-=back
-
-=item B<condition>
-
-A condition block that allows you define a more complex query. Each condition
-element is a hash reference with the following fields:
-
-=over 4
-
-=item B<operator>
-
-The condition operator to be used. If no operator value is given AND is assumed.
-Valid operators are: AND and OR.
-
-=item B<elements>
-
-Each condition contains a list of field and/or expression elements. These have
-already been defined above.
-
-=back
-
-=back
-
-An example of a valid query woudl be:
-
- query => [
- 	{
- 		name => 'AccountName',
- 		expressions => [{op => 'Equals', value => 'New Account'}]
-	},
-	{
-		operator => 'OR',
-		elements => [
-			{
-				name => 'FirstName',
-				expressions => [
-					{op => 'BeginsWith', value => 'A'},
-					{op => 'EndsWith', value => 'S'}
-				]
-			},
-			{
-				name => 'LastName',
-				expressions => [
-					{op => 'BeginsWith', value => 'A'},
-					{op => 'EndsWith', value => 'S'}
-				]
-			}
-		]
-	}
- ]
-
-This will find all accounts with the AccountName of New Account that also
-have either a FirstName or a LastName that begins with an A and ends with an
-S.
-
-=back
-
-=head2 update(@entities)
-
-Update the given entities. Entites will be verified prior to submitted to
-verify that they can be updated, any fields that are not updatable will
-be ignored. Each object reference needs to be blessed with the entity type
-that it is (Account, Contact, etc). Returns the list of entites that were
-updated successfully. If an error occurs $@ will be set and undef is returned.
-See the section on Entity format for more details on how to format entities to
-be accepted by this method.
-
-=head2 create(@entities)
+  my $created = $at->create($collection)
 
 Create the given entities. Entites will be verified prior to submitted to
-verify that they can be created, any fields that are not creatable will
+verify that they can be created, any fields that are not createable will
 be ignored on creation. Each object reference needs to be blessed with the
-entity type it is (Account, Contact, etc). Returns the list of entites that
-were created successfully. If an error occurs $@ will be set and undef is
-returned. See the section on Entity format for more details on how to format
-entities to be accepted by this method.
+entity type that it is (Account, Contact, etc). Returns a L</"collection"> of
+entites that were created successfully. See the section on Entity format for
+more details on how to format entities to be accepted by this method.
+
+The Autotask API imposes a limit on the number of records per request, and this
+method accounts for that and batches the collection into multiple requests.
 
 =head2 create_attachment($attach)
 
 Create a new attachment. Takes a hashref containing Data (the raw data of
 the attachment) and Info, which contains the AttachmentInfo. Returns the
 new attachment ID on success.
+
+=head2 delete
+
+  my $deleted = $at->delete($collection)
+  my $deleted = $at->delete($at->query('Account')->grep(sub{
+                  $_->{AccountName} =~ /^B/)
+                }))
+
+Delete the given entities. Entites will be verified prior to submitted to
+verify that they can be deleted, any fields that are not deleteable will
+be ignored on deletion. Each object reference needs to be blessed with the
+entity type that it is (Account, Contact, etc). Returns a L</"collection"> of
+entites that were deleted successfully. See the section on Entity format for
+more details on how to format entities to be accepted by this method.
+
+The Autotask API imposes a limit on the number of records per request, and this
+method accounts for that and batches the collection into multiple requests.
 
 =head2 delete_attachment($id)
 
@@ -1124,6 +990,142 @@ XXXXXXXXXXX
   my $collection = $at->get_field_info($entity, $field)
 
 XXXXXXXXXXXXX
+
+=head2 query
+
+  my $collection = $at->query($entity => [$query])
+  my $collection = $at->query({$entity => $months} => [$query])
+  my $collection = $at->query({Ticket => 12})
+
+Generic query method to query the Autotask system for entity data. If an error
+occurs while trying to parse the given arguments or creating the associated
+QueryXML query this method will die with an appropriate error. Returns a
+L</"collection"> of entity-specific blessed hash references.
+
+The Autotask API imposes a limit on the number of records per request, and this
+method accounts for that and batches the collection into multiple requests.
+
+The query argument is an array reference of fields and conditions that are used
+to construct the query XML. See below for the definition of a field and a
+condition. See also L<Mojo::Autotask::Limit> for tools to assist with crafting
+the query argument.
+
+=over 4
+
+=item B<field>
+
+A field is a hash reference that contains the following entries:
+
+=over 4
+
+=item B<name>
+
+The name of the field to be querying.
+
+=item B<udf>
+
+Boolean value to indicate if this field is a user defined field or not. Only
+one UDF field is allowed per query, by default if ommited this is set to
+false.
+
+=item B<expressions>
+
+An array of hash references for the expressions to apply to this field. The
+keys for this hash refernce are:
+
+=over 4
+
+=item B<op>
+
+The operator to use. One of: Equals, NotEqual, GreaterThan, LessThan,
+GreaterThanOrEquals, LessThanOrEquals, BeginsWith, EndsWith, Contains, IsNull,
+IsNotNull, IsThisDay, Like, NotLike or SoundsLike. If not in this list an
+error will be issued.
+
+=item B<value>
+
+The appropriate value to go with the given operator.
+
+=back
+
+=back
+
+=item B<condition>
+
+A condition block that allows you define a more complex query. Each condition
+element is a hash reference with the following fields:
+
+=over 4
+
+=item B<operator>
+
+The condition operator to be used. If no operator value is given AND is assumed.
+Valid operators are: AND and OR.
+
+=item B<elements>
+
+Each condition contains a list of field and/or expression elements. These have
+already been defined above.
+
+=back
+
+=back
+
+An example of a valid query argument for an Account entity would be:
+
+  [
+    {
+      name => 'AccountName',
+      expressions => [{op => 'Equals', value => 'New Account'}]
+    },
+    {
+      operator => 'OR',
+      elements => [
+        {
+          name => 'FirstName',
+          expressions => [
+            {op => 'BeginsWith', value => 'A'},
+            {op => 'EndsWith', value => 'S'}
+          ]
+        },
+        {
+          name => 'LastName',
+          expressions => [
+            {op => 'BeginsWith', value => 'A'},
+            {op => 'EndsWith', value => 'S'}
+          ]
+        }
+      ]
+    }
+  ]
+
+This will find all accounts with the AccountName of New Account that also
+have either a FirstName or a LastName that begins with an A and ends with an
+S.
+
+For reference with the Autotask API manual, this example produces the following
+XML:
+
+XXXXXXXXXX
+
+=back
+
+=head2 update
+
+  my $updated = $at->update($collection)
+  my $updated = $at->update($at->query('Account')->each(sub {
+                  $_->{AccountName} = uc($_->{AccountName})
+                }))
+
+Update the given entities. Entites will be verified prior to submitted to
+verify that they can be updated, any fields that are not updatable will
+be ignored on update. Each object reference needs to be blessed with the entity
+type that it is (Account, Contact, etc). Returns a L</"collection"> of entites
+that were updated successfully. See the section on Entity format for more
+details on how to format entities to be accepted by this method.
+
+The Autotask API imposes a limit on the number of records per request, and this
+method accounts for that and batches the collection into multiple requests.
 
 =head1 ENTITY FORMAT
 
