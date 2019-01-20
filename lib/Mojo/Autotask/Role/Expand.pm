@@ -1,76 +1,76 @@
 package Mojo::Autotask::Role::Expand;
 use Mojo::Base -role;
 
-use Mojo::Util 'dumper';
+use Mojo::JSON 'j';
+use Mojo::Util qw/b64_encode dumper md5_sum/;
 
+use Role::Tiny;
+use Scalar::Util 'blessed';
 use Time::Piece;
+
+requires 'map';
 
 # $at->cache_c->query('Ticket')->expand($at, ['ResourceID'])->grep(sub{$_->{ResourceID_ref_Name} eq 'John'})->size;
 sub expand {
   my ($self, $at, @args) = @_;
-  return $self unless $at;
+  return $self unless blessed $at && $at->isa('Mojo::Autotask') || $at->isa('Mojo::Recache');
+  my $no_cache = $at->isa('Mojo::Recache') ? $at->app : $at;
+
+  my @expand = grep { !ref } @args;
+  push @expand, map { @$_ } grep { ref eq 'ARRAY' } @args;
+  foreach my $h ( grep { ref eq 'HASH' } @args ) {
+    push @expand, map { {$_ => $h->{$_}} } keys %$h;
+  }
 
   my $data = {};
-  $self->each(sub {
+  $self->map(sub {
     my ($entity, $record) = (ref $_, $_);
-    $at->get_field_info_c($entity)->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
+    $no_cache->field_info->{$entity}->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
       $record->{"$_->{Name}_ref"} = defined $_->{Name} && $_->{ReferenceEntityType} && defined $record->{$_->{Name}} ? join(':', $_->{ReferenceEntityType}, $record->{$_->{Name}}) : '';
     });
-    $at->get_field_info_c($entity)->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
-      $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $at->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
+    $no_cache->field_info->{$entity}->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
+      $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $no_cache->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
     });
-    $at->get_field_info_c($entity)->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
-      return unless $record->{$_->{Name}};
+    $no_cache->field_info->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
+      return unless $record->{$_->{Name}} && !ref $record->{$_->{Name}};
       $record->{$_->{Name}} =~ s/\.\d+$//;
       eval { $record->{$_->{Name}} = Time::Piece->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
+      Role::Tiny->apply_roles_to_object($record->{$_->{Name}}, 'Time::Piece::Role::More');
       delete $record->{$_->{Name}} if $@;
     });
-    $_ = $record;
-  })->map(sub {
+    return $_ = $record unless @expand;
+
     # $at->query()->expand($at, [qw/a b c/]);
     # $at->query()->expand($at, 'a');
-    foreach my $arg ( grep { !ref $_ || ref $_ eq 'ARRAY' } @args ) {
-      foreach my $col ( ref $arg ? @$arg : $arg ) {
-        last unless $col;
-        $col.='_ref' unless $col =~ /_ref$/;
-        next unless $_->{$col};
-        my ($entity, $id) = split /:/, $_->{$col};
-        next unless $entity && defined $id;
-        $data->{$entity} ||= $at->query($entity)->hashify('id');
-        foreach my $l ( keys %{$data->{$entity}->{$id}} ) {
-          $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
-        }
-      }
-    }
     # $at->query()->expand($at, {a => 'a1'});
     # $at->query()->expand($at, {a => {}});
     # $at->query()->expand($at, {a => [qw/a b c/, {}]});
-    foreach my $arg ( grep { ref $_ eq 'HASH' } @args ) {
-      while ( my ($col, $options) = each %$arg ) {
-        last unless $col;
-        $col.='_ref' unless $col =~ /_ref$/;
-        next unless $_->{$col};
-        my ($entity, $id) = split /:/, $_->{$col};
-        next unless $entity && defined $id;
-        my @query = grep { ref eq 'HASH' } ref $options eq 'ARRAY' ? @$options : $options;
-        $data->{$entity} ||= $at->query($entity, [@query])->hashify('id');
-        my @lookup = grep { ref eq 'ARRAY' || ! ref } ref $options eq 'ARRAY' ? @$options : $options;
-        foreach my $l ( @lookup ) {
-          $_->{"${col}_$l"} = $data->{$entity}->{$id}->{$l};
-        }
+    foreach ( @expand ) {
+      my ($col, $options) = ref ? each %$_ : ($_, []);
+      next unless $col;
+      $col.='_ref' unless $col =~ /_ref$/;
+      next unless $record->{$col};
+      my ($entity, $id) = split /:/, $record->{$col};
+      next unless $entity && defined $id;
+      my $query = [grep { ref eq 'HASH' } @$options];
+      my @keys  = grep { !ref || ref eq 'ARRAY' } @$options;
+      my $cache = md5_sum(b64_encode(j([$entity => $query])));
+      $data->{$cache} ||= $at->query($entity => $query)->expand($at)->hashify('id');
+      foreach my $k ( @keys ? @keys : keys %{$data->{$cache}->{$id}} ) {
+        $record->{"${col}_$k"} = $data->{$cache}->{$id}->{$k};
       }
     }
+    $_ = $record;
   });
-
-  return $self;
 }
 
 sub to_date {
   my ($self, $format) = @_;
   $format ||= '%m/%d/%Y %H:%M:%S';
-  $self->each(sub{
+  $self->map(sub{
     my $h = $_;
     $h->{$_} = $h->{$_}->strftime($format) foreach grep { ref $h->{$_} eq 'Time::Piece' } keys %$h;
+    $_ = $h;
   });
 }
 
