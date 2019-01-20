@@ -35,6 +35,8 @@ sub expand {
       return unless $record->{$_->{Name}} && !ref $record->{$_->{Name}};
       $record->{$_->{Name}} =~ s/\.\d+$//;
       eval { $record->{$_->{Name}} = Time::Piece->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
+      return if $@;
+      return unless blessed $record->{$_->{Name}} && $record->{$_->{Name}}->isa('Time::Piece');
       Role::Tiny->apply_roles_to_object($record->{$_->{Name}}, 'Time::Piece::Role::More');
       delete $record->{$_->{Name}} if $@;
     });
