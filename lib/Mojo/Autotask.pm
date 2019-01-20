@@ -45,18 +45,20 @@ has collection => sub {
   /)->new
 };
 has ec => sub { Mojo::Autotask::ExecuteCommand->new };
-has entity_info => sub { shift->cache->get_entity_info };
+has entity_info => sub {
+  my $self = shift;
+  $self->collection->new(@{$self->cache->get_entity_info});
+};
 has extra_args => sub {
   sub { map { $_[0]->$_ } qw/max_memory max_records tracking_id username/ }
 };
 has field_info => sub {
   my $self = shift;
   my $fields = {};
-  my $entity_info = $self->entity_info;
-  foreach ( @$entity_info ) {
+  $self->entity_info->each(sub {
     my $entity = $_->{Name};
-    $fields->{$entity} = $self->cache->get_field_info($entity);
-  }
+    $fields->{$entity} = $self->collection->new(@{$self->cache->get_field_info($entity)});
+  });
   return $fields;
 };
 has limits => sub { Mojo::Autotask::Limits->new };
@@ -73,11 +75,10 @@ has tracking_id => $ENV{AUTOTASK_TRACKINGID} || sub { die "No tracking_id provid
 has udf_info => sub {
   my $self = shift;
   my $fields = {};
-  my $entity_info = $self->entity_info;
-  foreach ( @$entity_info ) {
+  $self->entity_info->each(sub {
     my $entity = $_->{Name};
-    $fields->{$entity} = $self->cache->get_udf_info($entity);
-  }
+    $fields->{$entity} = $self->collection->new(@{$self->cache->get_udf_info($entity)});
+  });
   return $fields;
 };
 has username => $ENV{AUTOTASK_USERNAME} || sub { die "No username provided" };
@@ -157,34 +158,24 @@ sub get_attachment {
 }
 
 sub get_entity_info {
-  my $self = shift;
-  my $entity_info = $self->{_at_soap}->GetEntityInfo($self->{_soap_tracking})->result;
-  return $entity_info ? $entity_info->{EntityInfo} : [];
-}
-
-sub get_entity_info_c {
   my ($self, $entity) = @_;
-  my $entity_info = $self->collection->new(@{$self->entity_info});
-  return $entity ? $entity_info->grep(sub{$_->{Name} eq $entity}) : $entity_info;
+  my $entity_info = $self->{_at_soap}->GetEntityInfo($self->{_soap_tracking})->result;
+  return $entity_info ? $entity_info->{EntityInfo} : [] unless $entity;
+  return grep { $_->{Name} eq $entity } @$entity_info;
 }
 
 sub get_field_info {
-  my $self = shift;
-  my $field_info = $self->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value(shift), $self->{_soap_tracking})->result;
-  return $field_info ? $field_info->{Field} : [];
-}
-
-sub get_field_info_c {
   my ($self, $entity, $field) = @_;
-  my $field_info = $self->collection->new(@{$self->field_info->{$entity}});
-  return $field ? $field_info->grep(sub{$_->{Name} eq $field}) : $field_info;
+  die unless $entity;
+  my $field_info = $self->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value($entity), $self->{_soap_tracking})->result;
+  return $field_info ? $field_info->{Field} : [] unless $field;
+  return grep { $_->{Name} eq $field } @$field_info;
 }
 
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
-  die "missing entity" unless $entity;
-  die "missing field" unless $field;
-  my $picklist = $self->get_field_info_c($entity, $field)->map(sub{$_->{PickList}})->first;
+  die unless $entity && $field;
+  my $picklist = $self->field_info->{$entity}->grep(sub{$_->{Name} eq $field})->map(sub{$_->{PickList}})->first;
   return '' unless $picklist;
   if ( $kv && defined $vk ) {
     my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
@@ -199,15 +190,11 @@ sub get_threshold_and_usage_info {
 }
 
 sub get_udf_info {
-  my $self = shift;
-  my $udf_info = $self->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value(shift), $self->{_soap_tracking})->result;
-  return $udf_info ? $udf_info->{Field} : [];
-}
-
-sub get_udf_info_c {
   my ($self, $entity, $field) = @_;
-  my $udf_info = $self->collection->new(@{$self->udf_info->{$entity}});
-  return $field ? $udf_info->grep(sub{$_->{Name} eq $field}) : $udf_info;
+  die unless $entity;
+  my $udf_info = $self->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value($entity), $self->{_soap_tracking})->result;
+  return $udf_info ? $udf_info->{Field} : [] unless $field;
+  return grep { $_->{Name} eq $field } @$udf_info;
 }
 
 sub get_zone_info {
@@ -446,7 +433,8 @@ sub _read {
   my $self = shift;
 
   my $cache = $self->cache;
-  my $name = $self->cached ? $cache->name(query => @_) : undef;
+  # The purpose of this is to provide a means for showing query details on DEBUG
+  my $name = $self->cached ? $cache->name(query => @_) : undef, DEBUG > 1 ? $cache->name(query => @_) : ();
   my $short = $self->cached ? $cache->short($name) : '-'x6;
   my $data = $self->cached ? $cache->retrieve($name) : [];
 
@@ -482,7 +470,7 @@ sub _read {
       @$query,
     ];
 
-    warn dumper($_query) if DEBUG;
+    warn dumper($_query) if DEBUG > 1;
     my $query_xml = $self->_create_query_xml($entity, $_query);
 
     my $soap = $self->{_at_soap};
@@ -834,7 +822,7 @@ XXXXXXXXXXX
   my $udf_info = $at->udf_info;
   $at          = $at->udf_info({})
 
-XXXXXXXXXXX
+A hash ref of L<Mojo::Collection> objects of entity field UDF info.
 
 =head2 tracking_id
 
@@ -933,29 +921,17 @@ doesn't exist or if there is an error.
 
 =head2 get_entity_info
 
-  my $collection = $at->get_entity_info
+  my $entities = $at->get_entity_info;
+  my $entity   = $at->get_entity_info($entity);
 
-Return a L<Mojo::Collection> that contains the ID values and options for a
-
-=head2 get_entity_info_c
-
-  my $collection = $at->get_entity_info_c
-
-XXXXXXXXXXXX
+Return entity into.
 
 =head2 get_field_info
 
-  my $collection = $at->get_field_info($entity)
-  my $collection = $at->get_field_info($entity, $field)
+  my $fields = $at->get_field_info($entity)
+  my $field  = $at->get_field_info($entity, $field)
 
-Return a L<Mojo::Collection> that contains the ID values and options for a
-
-=head2 get_field_info_c
-
-  my $collection = $at->get_field_info_c($entity)
-  my $collection = $at->get_field_info_c($entity, $field)
-
-XXXXXXXXXXXXXXXX
+Return field info for a specified entity.
 
 =head2 get_picklist_options
 
@@ -977,17 +953,10 @@ XXXXXXXXXXX
 
 =head2 get_udf_info
 
-  my $collection = $at->get_field_info($entity)
-  my $collection = $at->get_field_info($entity, $field)
+  my $udfs = $at->get_udf_info($entity)
+  my $udf  = $at->get_udf_info($entity, $field)
 
-XXXXXXXXXXX
-
-=head2 get_udf_info_c
-
-  my $collection = $at->get_field_info($entity)
-  my $collection = $at->get_field_info($entity, $field)
-
-XXXXXXXXXXX
+Return UDF info for a specified entity.
 
 =head2 get_zone_info
 
