@@ -40,6 +40,10 @@ sub expand {
       Role::Tiny->apply_roles_to_object($record->{$_->{Name}}, 'Time::Piece::Role::More');
       delete $record->{$_->{Name}} if $@;
     });
+    if ( $record->{UserDefinedFields} ) {
+      $record->{"UDF_$_->[0]"} = $_->[1] foreach map { [$_->{Name} =~ s/\W/_/gr, $_->{Value}||''] } grep { ref eq 'HASH' } @{$record->{UserDefinedFields}->{UserDefinedField}};
+      delete $record->{UserDefinedFields};
+    }
     return $_ = $record unless @expand;
 
     # $at->query()->expand($at, [qw/a b c/]);
