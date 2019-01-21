@@ -175,7 +175,7 @@ sub get_field_info {
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die unless $entity && $field;
-  my $picklist = $self->field_info->{$entity}->grep(sub{$_->{Name} eq $field})->map(sub{$_->{PickList}})->first;
+  my $picklist = $self->field_info->{$entity}->grep(sub{$_->{Name} eq $field})->map(sub{$_->{PicklistValues}->{PickListValue}})->first;
   return '' unless $picklist;
   if ( $kv && defined $vk ) {
     my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
