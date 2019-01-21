@@ -172,16 +172,18 @@ sub get_field_info {
   return grep { $_->{Name} eq $field } @$field_info;
 }
 
+#Where Value == 8, return Label
+#Where Label eq Partner, return Value
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die unless $entity && $field;
   my $picklist = $self->field_info->{$entity}->grep(sub{$_->{Name} eq $field})->map(sub{$_->{PicklistValues}->{PickListValue}})->first;
-  return '' unless $picklist;
-  if ( $kv && defined $vk ) {
-    my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
-    return $picklist->grep(sub{$_->{$kv} eq $vk})->map(sub{$_->{$_kv}})->first || '';
-  }
-  return $picklist;
+  return unless $picklist;
+  return $picklist unless $kv;
+  my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
+  $picklist = {map { $_->{$kv} => $_ } @$picklist};
+  return $picklist unless defined $vk;
+  return $picklist->{$vk}->{$_kv};
 }
 
 sub get_threshold_and_usage_info {
