@@ -1,10 +1,34 @@
-package Mojo::Autotask::Limits;
+# $ perl -Mlib=lib -MTime::Piece -MMojo::Util=dumper -MMojo::Autotask::Limits -E 'my $l = Mojo::Autotask::Limits->new(entity => 'Ticket', last_activity => localtime->add_months(-3), Ticket => 36); say dumper(\@$l)'
+
+package Mojo::Autotask::Query;
 use Mojo::Base -base;
 
+use overload
+  '@{}'      => sub {
+                  my $self = shift;
+                  [$self->_last_id, $self->_last_activity, $self->_start_date, @{$self->query}]
+                },
+  'fallback' => 1;
+
+use Role::Tiny;
 use Scalar::Util 'blessed';
 use Time::Piece;
 
-has 'now';
+Role::Tiny->apply_roles_to_package('Time::Piece', 'Time::Piece::Role::More');
+
+has entity        => sub { die };
+has last_activity => undef;
+has last_id       => 0;
+has now           => undef;
+has query         => sub { [] };
+has refresh       => undef;
+has start_date    => sub {
+  my $self = shift;
+  my $entity = $self->entity;
+  return undef unless my $months = $self->$entity;
+  my $now = $self->now || localtime;
+  return $now->add_months($months * -1);
+};
 
 has Account => undef;
 has AccountNote => 12;
@@ -38,87 +62,11 @@ has TimeEntry => 12;
 has UserDefinedFieldDefinition => undef;
 has UserDefinedFieldListItem => undef;
 
-sub clone {
+sub _last_activity {
   my $self = shift;
-  $self->SUPER::new((ref $self ? %$self : ()), @_);
-}
-
-sub grep {
-  my $self = shift;
-  return map { {name => $_->[0], expressions => [{op => $_->[1], value => $_->[2]}]} } @_;
-}
-
-sub in_list {
-  my ($self, $name, $op) = (shift, shift, shift);
-  return
-  {
-    elements => [
-      {
-        name => $name,
-        expressions => [{op => $op, value => "$_[0]"}]
-      }
-    ]
-  },
-  (map {
-    {
-      operator => 'OR',
-      elements => [
-        {
-          name => $name,
-          expressions => [{op => $op, value => "$_"}]
-        }
-      ]
-    }
-  } grep { $_ } @_[1..199])
-}
-
-sub limit {
-  my ($self, $entity) = @_;
-  return () unless $entity;
-  my %limits = (
-    Account => 'CreateDate',
-    AccountToDo => 'CreateDateTime',
-    Appointment => 'CreateDateTime',
-    BillingItem => 'ItemDate',
-    Contact => 'CreateDate',
-    ContractCost => 'CreateDate',
-    ContractMilestone => 'CreateDate',
-    ContractNote => 'LastActivityDate',
-    Currency => 'LastModifiedDateTime',
-    InstalledProduct => 'CreateDate',
-    Invoice => 'CreateDateTime',
-    Opportunity => 'CreateDate',
-    Phase => 'CreateDate',
-    Project => 'CreateDateTime',
-    ProjectCost => 'CreateDate',
-    ProjectNote => 'LastActivityDate',
-    PurchaseOrder => 'CreateDateTime',
-    Quote => 'CreateDate',
-    QuoteTemplate => 'CreateDate',
-    Service => 'CreateDate',
-    ServiceBundle => 'CreateDate',
-    ServiceCall => 'CreateDateTime',
-    Task => 'CreateDateTime',
-    TaskNote => 'LastActivityDate',
-    Ticket => 'CreateDate',
-    TicketCost => 'CreateDate',
-    TicketNote => 'LastActivityDate',
-    TimeEntry => 'CreateDateTime',
-    UserDefinedFieldDefinition => 'CreateDate',
-    UserDefinedFieldListItem => 'CreateDate',
-  );
-  return () unless my $name = $limits{$entity};
-  return () unless my $months = $self->$entity;
-  my $now = $self->now || localtime;
-  return (
-    {name => $name, expressions => [{op => 'GreaterThanOrEquals', value => $now->add_months($months * -1)->strftime('%Y-%m-01T00:00:00')}]},
-    {name => $name, expressions => [{op => 'LessThan', value => $now->add_months(1)->strftime('%Y-%m-01T00:00:00')}]},
-  );
-}
-
-sub since {
-  my ($self, $entity, $t) = @_;
-  return () unless blessed($t) && $t->isa('Time::Piece');
+  return () unless my $t = $self->last_activity;
+  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
+  my $entity = $self->entity;
   if ( $entity eq 'Account' ) {
     return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
   } elsif ( $entity eq 'AccountNote' ) {
@@ -155,22 +103,73 @@ sub since {
   return ();
 }
 
+sub _last_id {
+  my $self = shift;
+  my $last_id = $self->last_id;
+  return {name => 'id', expressions => [{op => ($last_id ? 'GreaterThan' : 'GreaterThanOrEquals'), value => "$last_id"}]};
+}
+
 1;
+
+sub _start_date {
+  my $self = shift;
+  return () unless my $t = $self->start_date;
+  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
+  my $entity = $self->entity;
+  my %limits = (
+    Account => 'CreateDate',
+    AccountToDo => 'CreateDateTime',
+    Appointment => 'CreateDateTime',
+    BillingItem => 'ItemDate',
+    Contact => 'CreateDate',
+    ContractCost => 'CreateDate',
+    ContractMilestone => 'CreateDate',
+    ContractNote => 'LastActivityDate',
+    Currency => 'LastModifiedDateTime',
+    InstalledProduct => 'CreateDate',
+    Invoice => 'CreateDateTime',
+    Opportunity => 'CreateDate',
+    Phase => 'CreateDate',
+    Project => 'CreateDateTime',
+    ProjectCost => 'CreateDate',
+    ProjectNote => 'LastActivityDate',
+    PurchaseOrder => 'CreateDateTime',
+    Quote => 'CreateDate',
+    QuoteTemplate => 'CreateDate',
+    Service => 'CreateDate',
+    ServiceBundle => 'CreateDate',
+    ServiceCall => 'CreateDateTime',
+    Task => 'CreateDateTime',
+    TaskNote => 'LastActivityDate',
+    Ticket => 'CreateDate',
+    TicketCost => 'CreateDate',
+    TicketNote => 'LastActivityDate',
+    TimeEntry => 'CreateDateTime',
+    UserDefinedFieldDefinition => 'CreateDate',
+    UserDefinedFieldListItem => 'CreateDate',
+  );
+  return () unless my $name = $limits{$entity};
+  my $now = $self->now || localtime;
+  return (
+    {name => $name, expressions => [{op => 'GreaterThanOrEquals', value => $t->strftime('%Y-%m-01T00:00:00')}]},
+    {name => $name, expressions => [{op => 'LessThan', value => $now->add_months(1)->strftime('%Y-%m-01T00:00:00')}]},
+  );
+}
 
 =encoding utf8
 
 =head1 NAME 
 
-Mojo::Autotask::Limits - Build query filters for L<Mojo::Autotask>
+Mojo::Autotask::Query - Build query filters for L<Mojo::Autotask>
 
 =head1 SYNOPSIS
 
   package Mojo::Autotask;
   use Mojo::Base -base;
 
-  use Mojo::Autotask::Limits;
+  use Mojo::Autotask::Query;
 
-  has limits => sub { Mojo::Autotask::Limits->new };
+  has limits => sub { Mojo::Autotask::Query->new };
 
   package main;
   use Mojo::Base -strict;
@@ -186,7 +185,7 @@ Mojo::Autotask::Limits - Build query filters for L<Mojo::Autotask>
 
 =head1 ATTRIBUTES
 
-L<Mojo::Autotask::Limits> implements the following attributes.
+L<Mojo::Autotask::Query> implements the following attributes.
 
 =head2 <Entity>
 
@@ -194,7 +193,7 @@ L<Mojo::Autotask::Limits> implements the following attributes.
   $limits    = $limits->Ticket(24);
 
 Some Autotask API entities support dates and these can be used to help narrow
-the query results. L<Mojo::Autotask::Limits> defines some good defaults for
+the query results. L<Mojo::Autotask::Query> defines some good defaults for
 how many months a query should be limited to. If the months is undefined then
 the entity query is not limited by date.
 

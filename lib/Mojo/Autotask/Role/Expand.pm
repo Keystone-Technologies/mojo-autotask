@@ -1,20 +1,18 @@
 package Mojo::Autotask::Role::Expand;
 use Mojo::Base -role;
 
+use Mojo::Autotask::Util 'localtime';
 use Mojo::JSON 'j';
 use Mojo::Util qw/b64_encode dumper md5_sum/;
 
-use Role::Tiny;
 use Scalar::Util 'blessed';
-use Time::Piece;
 
 requires 'map';
 
-# $at->cache_c->query('Ticket')->expand($at, ['ResourceID'])->grep(sub{$_->{ResourceID_ref_Name} eq 'John'})->size;
+# $at->query('Ticket')->expand($at, ['ResourceID'])->grep(sub{$_->{ResourceID_ref_Name} eq 'John'})->size;
 sub expand {
   my ($self, $at, @args) = @_;
-  return $self unless blessed $at && $at->isa('Mojo::Autotask') || $at->isa('Mojo::Recache');
-  my $no_cache = $at->isa('Mojo::Recache') ? $at->app : $at;
+  return $self unless blessed $at && $at->isa('Mojo::Autotask');
 
   my @expand = grep { !ref } @args;
   push @expand, map { @$_ } grep { ref eq 'ARRAY' } @args;
@@ -25,19 +23,16 @@ sub expand {
   my $data = {};
   $self->map(sub {
     my ($entity, $record) = (ref $_, $_);
-    $no_cache->field_info->{$entity}->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
+    $at->entities->{$entity}->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
       $record->{"$_->{Name}_ref"} = defined $_->{Name} && $_->{ReferenceEntityType} && defined $record->{$_->{Name}} ? join(':', $_->{ReferenceEntityType}, $record->{$_->{Name}}) : '';
     });
-    $no_cache->field_info->{$entity}->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
-      $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $no_cache->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
+    $at->entities->{$entity}->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
+      $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $at->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
     });
-    $no_cache->field_info->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
+    $at->entities->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
       return unless $record->{$_->{Name}} && !ref $record->{$_->{Name}};
       $record->{$_->{Name}} =~ s/\.\d+$//;
-      eval { $record->{$_->{Name}} = Time::Piece->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
-      return if $@;
-      return unless blessed $record->{$_->{Name}} && $record->{$_->{Name}}->isa('Time::Piece');
-      Role::Tiny->apply_roles_to_object($record->{$_->{Name}}, 'Time::Piece::Role::More');
+      eval { $record->{$_->{Name}} = localtime->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
       delete $record->{$_->{Name}} if $@;
     });
     if ( $record->{UserDefinedFields} ) {

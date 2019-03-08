@@ -2,14 +2,12 @@ package Mojolicious::Plugin::Autotask;
 use Mojo::Base 'Mojolicious::Plugin';
 
 use Mojo::Autotask;
-use Mojo::Recache;
 
 sub register {
   my ($self, $app, $conf) = @_;
 
   push @{$app->commands->namespaces}, 'Mojo::Autotask::Command';
-  my $cache = Mojo::Recache->new(home => $app->home, log => $app->log);
-  my $at = Mojo::Autotask->new(%$conf, cache => $cache);
+  my $at = Mojo::Autotask->new(%$conf);
   $app->helper('autotask' => sub {$at});
 }
 

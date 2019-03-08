@@ -1,27 +1,27 @@
 package Mojo::Autotask;
-use Mojo::Base 'Mojo::EventEmitter';
+use Mojo::Base -base;
 
 use Mojo::Autotask::ExecuteCommand;
-use Mojo::Autotask::Limits;
+use Mojo::Autotask::Query;
+use Mojo::Autotask::Util 'localtime';
 use Mojo::Collection;
-use Mojo::Recache;
+use Mojo::JSON;
+use Mojo::Promise;
+use Mojo::Redis;
 use Mojo::URL;
-use Mojo::Util qw/camelize dumper/;
-#use Mojolicious::Commands;
-#use Mojolicious::Plugins;
-#use Mojolicious::Validator;
+use Mojo::UserAgent;
+use Mojo::Util 'dumper';
 
 use Carp;
-use Memory::Usage;
-use Devel::Size qw(size total_size);
-use Time::Piece;
+use Time::Seconds;
 use SOAP::Lite;#  +trace => 'debug';
 use XML::LibXML;
 use Scalar::Util qw(blessed);
 use MIME::Base64;
 use Encode;
 
-use constant DEBUG => $ENV{MOJO_AUTOTASK_DEBUG} || 0;
+use constant DEBUG   => $ENV{MOJO_AUTOTASK_DEBUG}   || 0;
+use constant REFRESH => $ENV{MOJO_AUTOTASK_REFRESH} || 0;
 
 use vars qw($VERSION);
 $VERSION = '1.60';
@@ -34,9 +34,7 @@ my @VALID_OPS = qw(
 
 my @VALID_CONDITIONS = qw(AND OR);
 
-has cache => sub { Mojo::Recache->new(app => shift) };
-has cached => 0;
-has collection => sub {
+has collection  => sub {
   Mojo::Collection->with_roles(qw/
     +UtilsBy
     +Hashes
@@ -44,140 +42,66 @@ has collection => sub {
     Mojo::Autotask::Role::Tablify
   /)->new
 };
-has ec => sub { Mojo::Autotask::ExecuteCommand->new };
-has entity_info => sub {
-  my $self = shift;
-  $self->collection->new(@{$self->cache->get_entity_info});
-};
-has extra_args => sub {
-  sub { map { $_[0]->$_ } qw/max_memory max_records tracking_id username/ }
-};
-has field_info => sub {
-  my $self = shift;
-  my $fields = {};
-  $self->entity_info->each(sub {
-    my $entity = $_->{Name};
-    $fields->{$entity} = $self->collection->new(@{$self->cache->get_field_info($entity)});
-  });
-  return $fields;
-};
-has limits => sub { Mojo::Autotask::Limits->new };
-has max_memory => 250_000;
-has max_records => 2_500;
-has password => $ENV{AUTOTASK_PASSWORD} || sub { die "No password provided" };
-has soap_proxy => sub {
-  Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx')
-};
-has threshold_and_usage_info => sub {
-  shift->cache->get_threshold_and_usage_info
-};
-has tracking_id => $ENV{AUTOTASK_TRACKINGID} || sub { die "No tracking_id provided" };
-has udf_info => sub {
-  my $self = shift;
-  my $fields = {};
-  $self->entity_info->each(sub {
-    my $entity = $_->{Name};
-    $fields->{$entity} = $self->collection->new(@{$self->cache->get_udf_info($entity)});
-  });
-  return $fields;
-};
-has username => $ENV{AUTOTASK_USERNAME} || sub { die "No username provided" };
-has ws_url => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
-has zone_info => sub { shift->cache->get_zone_info };
+has ec          => sub { Mojo::Autotask::ExecuteCommand->new };
+has password    => sub { $ENV{AUTOTASK_PASSWORD} or die };
+has redis       => sub { state $r = Mojo::Redis->new };
+has soap_proxy  => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
+has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
+has ua          => sub { Mojo::UserAgent->new };
+has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
+has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
 
-has valid_entities => sub { {} };
+has entities => sub {
+  my $at = shift;
+  my $entities;
+  $at->get_entity_info_p->then(sub {
+    if (!exists($_[0]) || ref($_[0]) ne 'ARRAY') {
+      die "Unable to get a list of valid Entities from the Autotask server";
+    }
+    $entities->{$_->{Name}} = $_ foreach @{$_[0]};
+  })->wait;
+  foreach my $entity ( keys %$entities ) {
+    warn "-- $entity" if DEBUG;
+    # MED: These should be able to run in parallel
+    $at->get_field_info_p($entity)->then(sub {
+      $entities->{$entity}->{fields}->{$_->{Name}} = $_ foreach @{$_[0]};
+    })->wait;
+    $at->get_udf_info_p($entity)->then(sub {
+      $entities->{$entity}->{fields}->{$_->{Name}} = $_ foreach map { $_->{IsUDF} = 'true'; $_ } @{$_[0]};
+    })->wait;
+  }
+  return $entities;
+};
 
 has _api_records_per_create => 200;
 has _api_records_per_delete => 200;
 has _api_records_per_query  => 500;
 has _api_records_per_update => 200;
 
-sub clone {
-  my $self  = shift;
-  my $clone = $self->SUPER::new(@_);
-  $clone->{$_} //= $self->{$_} for keys %$self;
-  return $clone;
-}
+###
 
 sub create { shift->_write(create => shift) }
 
-sub create_attachment {
-  my ($self, $attach) = @_;
+sub create_p { shift->_write_p(create => shift) }
 
-  # Get the entity information if we don't already have it.
-  my $atb = "Attachment";
-  my $ati = $atb . "Info";
-  $self->_load_entity_field_info($ati);
-
-  # Collect the Info fields
-  my $e_info = $self->valid_entities->{$ati};
-  my @inf;
-  foreach my $f_name (keys %{$$attach{Info}}) {
-    die "Field $f_name is not a valid field for $ati"
-      if (!$e_info->{fields}->{$f_name});
-    push @inf, SOAP::Data->name($f_name => $$attach{Info}{$f_name});
-  }
-
-  my $data = decode("utf8", $$attach{Data});
-  my $soap = $self->{_at_soap};
-  my $res = $soap->CreateAttachment(
-    SOAP::Data->name("attachment" => \SOAP::Data->value(
-    SOAP::Data->name(Info => \SOAP::Data->value(@inf))->attr({'xsi:type' => $ati}),
-    SOAP::Data->name('Data')->value($data)->type('base64Binary'),
-  ), $self->{_soap_tracking})->attr({'xsi:type' => $atb}));
-  return $res->valueof('//CreateAttachmentResponse/CreateAttachmentResult');
-}
+sub create_attachment_p {}
 
 # HIGH: Test this, this is just copied from create()
 #       Need to read the API
 sub delete { shift->_write(delete => shift) }
 
-sub delete_attachment {
-  my ($self, $id) = @_;
+sub delete_p { shift->_write_p(delete => shift) }
 
-  my $soap = $self->{_at_soap};
-  my $res = $soap->DeleteAttachment(SOAP::Data->name('attachmentId')->value($id), $self->{_soap_tracking})->result;
-  if ($res) {
-    $self->_set_error($res);
-    return 0;
-  }
-  return 1;
-}
+sub delete_attachment_p {}
 
-sub get_attachment {
-  my ($self, $id) = @_;
-
-  # The result is either a hashref with Data and Info or undef
-  my $soap = $self->{_at_soap};
-  my $res = $soap->GetAttachment(SOAP::Data->name('attachmentId')->value($id), $self->{_soap_tracking})->result;
-  if ($res && %$res && $$res{Data}) {
-    # Go ahead and decode it
-    $$res{Data} = decode_base64($$res{Data});
-  }
-  return $res;
-}
-
-sub get_entity_info {
-  my ($self, $entity) = @_;
-  my $entity_info = $self->{_at_soap}->GetEntityInfo($self->{_soap_tracking})->result;
-  return $entity_info ? $entity_info->{EntityInfo} : [] unless $entity;
-  return grep { $_->{Name} eq $entity } @$entity_info;
-}
-
-sub get_field_info {
-  my ($self, $entity, $field) = @_;
-  die unless $entity;
-  my $field_info = $self->{_at_soap}->GetFieldInfo(SOAP::Data->name("psObjectType")->value($entity), $self->{_soap_tracking})->result;
-  return $field_info ? $field_info->{Field} : [] unless $field;
-  return grep { $_->{Name} eq $field } @$field_info;
-}
+sub get_attachment_p {}
 
 #Where Value == 8, return Label
 #Where Label eq Partner, return Value
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die unless $entity && $field;
-  my $picklist = $self->field_info->{$entity}->grep(sub{$_->{Name} eq $field})->map(sub{$_->{PicklistValues}->{PickListValue}})->first;
+  my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
   return unless $picklist;
   return $picklist unless $kv;
   my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
@@ -186,33 +110,265 @@ sub get_picklist_options {
   return $picklist->{$vk}->{$_kv};
 }
 
+sub get_entity_info {
+  my $self = shift;
+  my $results;
+  $self->get_entity_info_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
+}
+
+sub get_entity_info_p {
+  my $self = shift;
+  $self->_cache(_post_p => GetEntityInfo => undef => ONE_DAY * 30)->then(sub {
+    shift->{EntityInfo}
+  });
+}
+
+sub get_field_info {
+  my $self = shift;
+  my $results;
+  $self->get_field_info_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
+}
+
+sub get_field_info_p {
+  my ($self, $entity) = @_;
+  my $data = SOAP::Data->name('psObjectType')->value($entity);
+  $self->_cache(_post_p => GetFieldInfo => $data => ONE_DAY)->then(sub {
+    shift->{Field}
+  });
+}
+
 sub get_threshold_and_usage_info {
   my $self = shift;
-  return $self->{_at_soap}->getThresholdAndUsageInfo($self->{_soap_tracking})->result || {};
+  my $results;
+  $self->get_threshold_and_usage_info_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
+}
+
+sub get_threshold_and_usage_info_p {
+  my $self = shift;
+  $self->_cache(_post_p => getThresholdAndUsageInfo => undef => 0)->then(sub {
+    shift->{EntityReturnInfoResults}->{EntityReturnInfo}
+  });
 }
 
 sub get_udf_info {
-  my ($self, $entity, $field) = @_;
-  die unless $entity;
-  my $udf_info = $self->{_at_soap}->getUDFInfo(SOAP::Data->name("psTable")->value($entity), $self->{_soap_tracking})->result;
-  return $udf_info ? $udf_info->{Field} : [] unless $field;
-  return grep { $_->{Name} eq $field } @$udf_info;
+  my $self = shift;
+  my $results;
+  $self->get_udf_info_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
+}
+
+sub get_udf_info_p {
+  my ($self, $entity) = @_;
+  my $data = SOAP::Data->name('psTable')->value($entity);
+  $self->_cache(_post_p => getUDFInfo => $data => ONE_DAY)->then(sub {
+    shift->{Field}
+  });
 }
 
 sub get_zone_info {
   my $self = shift;
-  $self->{_at_soap}->getZoneInfo(SOAP::Data->value($self->username)->name('UserName'), $self->{_soap_tracking})->result || {};
+  my $results;
+  $self->get_zone_info_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
 }
 
-sub new { shift->SUPER::new(@_)->_init_soap }
+sub get_zone_info_p {
+  my $self = shift;
+  my $data = SOAP::Data->name('UserName')->value($self->username);
+  $self->_cache(_post_p => getZoneInfo => $data => ONE_DAY * 30)->then(sub {
+    shift
+  });
+}
 
-sub query { shift->_read(@_) }
+sub new {
+  my $self = shift->SUPER::new(@_);
+
+  my $userinfo = join ':', $self->username, $self->password;
+  # LOW: Resolve recursively like WebService::Autotask?
+  $self->get_zone_info_p->then(sub {
+    my $zone_info = shift;
+    $self->soap_proxy(Mojo::URL->new($zone_info->{URL})
+                               ->userinfo($userinfo));
+    $self->ec->zone(Mojo::URL->new($zone_info->{WebUrl}));
+  })->wait;
+
+  warn $self->soap_proxy->to_unsafe_string if DEBUG;
+
+  return $self;
+}
+
+sub query {
+  my $self = shift;
+  my $results;
+  $self->query_p(@_)->then(sub { $results = [@_] })->wait;
+  return $results;
+}
+
+sub query_p {
+  my $self = shift;
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : Mojo::Autotask::Query->new(ref $_[0] eq 'HASH' ? shift : ());
+  $query->entity(shift) if $_[0] && !ref $_[0];
+  $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
+
+  # Validate that we have the right arguments.
+  $self->_validate_entity_argument($query->entity, 'query');
+
+  warn dumper(\@$query) if DEBUG > 1;
+  my $query_xml = $self->_create_query_xml($query->entity, \@$query);
+  my $data = SOAP::Data->name('sXML')->value($query_xml);
+  $self->_cache(_post_p => query => $data => ONE_DAY)->then(sub {
+    my ($res, $mtime) = @_;
+    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+      # There were errors. Grab the errors and set $@ to their textual values.
+      $self->_set_error($res->{Errors}->{ATWSError});
+      return undef;
+    }
+    return $self->collection->new(_get_entity_results($res));
+  });
+}
+
+sub query_all {
+  my $self = shift;
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : Mojo::Autotask::Query->new(ref $_[0] eq 'HASH' ? shift : ());
+  $query->entity(shift) if $_[0] && !ref $_[0];
+  $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
+ 
+  # Validate that we have the right arguments.
+  $self->_validate_entity_argument($query->entity, 'query');
+ 
+  #my $key = join ':', '@MT' => (ref($self) || $self), $entity, Mojo::JSON::encode_json($query);
+  #$since = $self->redis->db->get($key) unless $since;
+
+  my $all = $self->collection->new;
+
+  while ( 1 ) {
+    $self->query_p($query)->then(sub {
+      my ($res) = @_;
+      $query->last_id(@$res == $self->_api_records_per_query ? $res->last->{id} : undef);
+      return if not defined $query->last_id;
+      push @$all, @$res;
+      warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total", $res->size, $query->last_id, $res->last->{CreateDate}||'', $all->size;
+    })->wait;
+    last if not defined $query->last_id;
+  }
+
+  return $all;
+}
+
+sub query_all_p { Mojo::Promise->resolve(shift->query_all(@_)) }
 
 sub update { shift->_write(update => shift) }
 
-###################
+sub update_p { shift->_write_p(update => shift) }
+
+###
+
+sub _cache {
+  my ($self, $method, $action, $data, $expire) = @_;
+  my @data = ref $data eq 'ARRAY' ? @$data : $data;
+  my @soap = $self->_soap($action => @data);
+  if ( $self->redis && (not(defined($expire)) || $expire > 0) ) {
+    warn "-- Caching $method $action with Redis" if DEBUG;
+    $self->redis->cache->refresh(REFRESH)->memoize_p(
+      $self, $method => [@soap], $expire
+    )->then(sub {
+      $_[0]->[1] = localtime->new($_[0]->[1]);
+      return @{$_[0]};
+    })->catch(sub {
+      warn "Something went wrong in _cache: $_[0]";
+    });
+  } else {
+    warn "-- No Caching $method $action with Redis" if DEBUG;
+    $self->$method(@soap);
+  }
+}
+
+# MED: Use minion to keep these queries refreshed
+sub _post_p {
+  my ($self, $action) = (shift, shift);
+  warn "-- Refresh $action (sending SOAP request)" if DEBUG;
+  warn dumper([@_]) if DEBUG > 1;
+  my $result;
+  $self->ua->post_p(@_)->then(sub {
+    [SOAP::Deserializer->deserialize(shift->result->dom)->result, localtime->epoch]
+  });
+}
+
+sub _soap {
+  my ($self, $action) = (shift, shift);
+  warn "-- Building SOAP for $action (not yet sending SOAP request)" if DEBUG;
+  my @soap = (
+    $action,
+    $self->soap_proxy->to_unsafe_string,
+    {
+      'Accept'       => ['text/xml', 'multipart/*', 'application/soap'],
+      'Content-Type' => 'text/xml; charset=utf-8',
+      'SOAPAction'   => $self->ws_url->clone->path($action)->to_string
+    },
+    SOAP::Serializer->default_ns($self->ws_url->to_string)->envelope(
+      method => $action => @_,
+      SOAP::Header->attr({xmlns => $self->ws_url->to_string})
+                  ->value(\SOAP::Data->value($self->tracking_id)
+                                     ->name('IntegrationCode'))
+                  ->name('AutotaskIntegrations'),
+    )
+  );
+  warn dumper(\@soap) if DEBUG > 2;
+  return @soap;
+}
+
+sub _write {
+  my ($self, $type, $collection) = @_;
+
+  die "Missing type argument in call to _write (create, delete, update)" unless $type && $type =~ /^(create|delete|update)$/;
+  die "Missing collection argument in call to _write" unless $collection;
+  die "Collection argument not of type Mojo::Collection" unless $collection->isa('Mojo::Collection');
+
+  my $api_records_per = "_api_records_per_$type";
+
+  my $done  = $collection->new;
+  my $batch = Mojo::Collection->new;
+  my $todo  = Mojo::Collection->new;
+
+  # Validate that we have the right arguments.
+  $collection->each(sub {
+    $self->_validate_entity_argument($_, $type);
+
+    # Verify all fields provided are valid.
+    $self->_validate_fields($_);
+
+    # Autotask API limits how many updates can occur per update
+    # Create batches and push each full batch to the todo collection
+    push @$batch, _entity_as_soap_data($_);
+    if ( $batch->size == $self->$api_records_per ) {
+      push @$todo, $batch;
+      $batch = $batch->new;
+    }
+  });
+  # Keep the final, unfilled batch
+  push @$todo, $batch if $batch->size;
+
+  $todo->each(sub {
+    my $data = SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @$_));
+    $self->_cache(_post_p => getZoneInfo => $data => ONE_DAY)->then(sub {
+      push @$done, _get_entity_results(shift);
+    })->wait;
+  });
+
+  return $done;
+}
+
+sub _write_p { Mojo::Promise->resolve(shift->_write(@_)) }
+
+###
+# These functions are from WebService::Autotask
+###
 
 # LOW: Mojo::DOM should be able to do this
+# query() uses this
 sub _create_query_xml {
   my ($self, $entity, $query) = @_;
 
@@ -246,6 +402,7 @@ sub _create_query_xml {
   return $xml->toString();
 }
 
+# update() and create() use this
 sub _entity_as_soap_data {
   my ($entity) = @_;
 
@@ -271,6 +428,7 @@ sub _entity_as_soap_data {
 }
 
 # This function is used to return a consistent value: a list, not a ref
+# query(), update(), and create() use this
 sub _get_entity_results {
   my ($result) = @_;
 
@@ -290,92 +448,7 @@ sub _get_entity_results {
   return($ents);
 }
 
-sub _init_soap {
-  my $self = shift;
-
-  my $cache = $self->cache->app($self);
-
-  # Create an empty hashref for the proxies arg if we don't already have one
-  # defined.
-  $self->{_proxies} ||= {};
-
-  # MED: Replace SOAP::Lite transactions with non-blocking Mojo::UserAgent promise
-  #      Only needed for processing XML (and even that could be replaced by Mojo::DOM)
-  my $site = $self->soap_proxy->host;
-  my $soap = $self->{_at_soap} = SOAP::Lite
-    ->uri($self->ws_url->to_string)
-    ->on_action(sub { return join('', @_)})
-    ->proxy($self->soap_proxy->to_string,
-      credentials => [
-        "$site:443", $site, $self->username => $self->password
-      ]);
-  $self->{_soap_tracking} = SOAP::Header->attr({xmlns => $self->ws_url->to_string})->value(\SOAP::Data->value($self->tracking_id)->name('IntegrationCode'))->name('AutotaskIntegrations');
-  $self->{error} = '';
-
-  # Check that we are using the right SOAP proxy.
-  my $res = $cache->get_zone_info;
-  if ($res->{Error} || $res->{ErrorCode}) {
-    die sprintf "Could not find correct Autotask Proxy for user: %s", $self->username;
-  }
-  # Set the proper URL base for ExecuteCommand
-  $self->ec->zone(Mojo::URL->new($res->{WebUrl}));
-  # See if our SOAP proxy matches the one provided.
-  if ($self->soap_proxy->to_string ne $res->{URL}) {
-    if (exists($self->{_proxies}->{$res->{URL}})) {
-      die sprintf "Infinite recursion detected. We have already tried the SOAP proxy %s but have been directed to it again", $res->{URL};
-    }
-    $self->{_proxies}->{$self->soap_proxy->to_string} = 1;
-    return $self->clone(soap_proxy => Mojo::URL->new($res->{URL}), _proxies => $self->{_proxies})->_init_soap;
-  }
-
-  # Get a list of all the entity types available.
-  $res = $cache->get_entity_info;
-  if ( ref $res ne 'ARRAY') {
-    die "Unable to get a list of valid Entities from the Autotask server";
-  }
-  foreach my $ent ( @$res ) {
-    $self->valid_entities->{$ent->{Name}} = $ent;
-  }
-
-  return $self;
-}
-
-sub _load_entity_field_info {
-  my ($self, $entity) = @_;
-
-  # If we have already loaded information for this entity, don't do it a
-  # second time.
-  return if $self->valid_entities->{$entity}->{fields};
-
-  my $soap = $self->{_at_soap};
-
-  # Now load the fields.
-  #my $res = $soap->GetFieldInfo(SOAP::Data->name('psObjectType')->value($entity))->result;
-  #foreach my $field (@{$res->{Field}}) {
-  #  $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
-  #}
-  my $res = $self->cache->get_field_info($entity);
-  foreach my $field ( @$res ) {
-    $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
-  }
-
-  # Now load the user derfined fields.
-  #$res = $soap->getUDFInfo(SOAP::Data->name('psTable')->value($entity))->result;
-  #if ($res && ref($res) eq 'HASH' && exists($res->{Field}) && ref($res->{Field}) eq 'ARRAY') {
-  #  foreach my $field (@{$res->{Field}}) {
-  #    $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
-  #    $self->valid_entities->{$entity}->{fields}->{$field->{Name}}->{IsUDF} = 'true';
-  #  }
-  #}
-  $res = $self->cache->get_udf_info($entity);
-  foreach my $field ( @$res ) {
-    $self->valid_entities->{$entity}->{fields}->{$field->{Name}} = $field;
-    $self->valid_entities->{$entity}->{fields}->{$field->{Name}}->{IsUDF} = 'true';
-  }
-
-  return;
-}
-
+# _create_query_xml() uses this; and it's recursive
 sub _parse_condition {
   my ($self, $entity, $doc, $condition) = @_;
 
@@ -406,14 +479,15 @@ sub _parse_condition {
   return $c_elem;
 }
 
+# _create_query_xml() and _parse_condition() uses this
 sub _parse_field {
   my ($self, $entity, $doc, $field) = @_;
 
   # Check to see that this entity actually has a field with this name.
   die "Invalid query field " . $field->{name} . " for entity $entity"
-    if (!$self->valid_entities->{$entity}->{fields}->{$field->{name}}->{IsQueryable});
+    if (!$self->entities->{$entity}->{fields}->{$field->{name}}->{IsQueryable});
   my $f_elem = $doc->createElement('field');
-  if ($self->valid_entities->{$entity}->{fields}->{$field->{name}}->{IsUDF}) {
+  if ($self->entities->{$entity}->{fields}->{$field->{name}}->{IsUDF}) {
     $f_elem->setAttribute('udf', 'true');
   }
   $f_elem->appendChild($doc->createTextNode($field->{name}));
@@ -431,78 +505,7 @@ sub _parse_field {
   return $f_elem;
 }
 
-sub _read {
-  my $self = shift;
-
-  my $cache = $self->cache;
-  # The purpose of this is to provide a means for showing query details on DEBUG
-  my $name = $self->cached ? $cache->name(query => @_) : undef, DEBUG > 1 ? $cache->name(query => @_) : ();
-  my $short = $self->cached ? $cache->short($name) : '-'x6;
-  my $data = $self->cached ? $cache->retrieve($name) : [];
-
-  my ($el, $query) = (shift, shift || []);
-  my ($entity, $entity_limit) = ref $el eq 'HASH' ? (each %$el) : ($el);
-
-  my $limits = $self->limits->clone;
-  $limits->$entity($entity_limit // $self->limits->$entity) if $limits->can($entity);
-  my @limits = $limits->limit($entity);
-  my @since = $self->cached ? $limits->since($entity => $cache->file($name)->tap(sub{$_=$_->stat->mtime if -e $_})) : ();
-
-  # Validate that we have the right arguments.
-  $self->_validate_entity_argument($entity, 'query');
-  die "Missing query argument in call to _read" unless ref $query eq 'ARRAY';
-
-  # Get the entity information if we don't already have it.
-  $self->_load_entity_field_info($entity);
-
-  my $last_id = 0;
-  $data = {map { $_->{id} => $_ } @$data};
-
-  my $mu = Memory::Usage->new();
-  $mu->record('init');
-  while ( 1 ) {
-    # We need to generate the QueryXML from the Query argument.
-    my $_query = [
-      {
-        name => 'id',
-        expressions => [{op => 'GreaterThan', value => "$last_id"}]
-      },
-      @since,
-      @limits,
-      @$query,
-    ];
-
-    warn dumper($_query) if DEBUG > 1;
-    my $query_xml = $self->_create_query_xml($entity, $_query);
-
-    my $soap = $self->{_at_soap};
-    my $res = $soap->query(SOAP::Data->value($query_xml)->name('sXML'), $self->{_soap_tracking})->result;
-    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-      # There were errors. Grab the errors and set $@ to their textual values.
-      $self->_set_error($res->{Errors}->{ATWSError});
-      return undef;
-    }
-
-    my @at = _get_entity_results($res);
-    my $fetched = scalar @at;
-    warn sprintf '[%s] Fetched %s results', $short, $fetched if DEBUG;
-    last unless $fetched;
-    $last_id = $at[-1]->{id}; # do they need to be sorted first or does Autotask always provide id-sorted results?
-    warn sprintf '[%s] Kept %s results', $short, scalar @at if DEBUG;
-    warn sprintf '[%s] Last ID: %s', $short, $last_id if DEBUG;
-    warn sprintf '[%s] Expanding %s dataset and merging into %d existing records', $short, $entity, scalar keys %$data if DEBUG;
-    warn sprintf '[%s] %s records, %s memory', $short, scalar keys %$data, total_size($data) if DEBUG;
-    #$data = {%$data, map { $_->{id} => $self->_expand($entity => $_) } @at};
-    $data = {%$data, map { $_->{id} => $_ } @at};
-    warn sprintf "[%s] %s records, %s memory", $short, scalar keys %$data, total_size($data) if DEBUG;
-    $mu->record(scalar keys %$data);
-    warn sprintf '[%s] Max Records: %s (%s) / Max Memory: %s (%s)', $short, $self->max_records, scalar keys %$data, $self->max_memory, $mu->state->[-1]->[-1] if DEBUG;
-    #$mu->dump;
-    last if $fetched < $self->_api_records_per_query || scalar keys %$data >= $self->max_records || ($self->max_memory && $mu->state->[-1]->[-1] > $self->max_memory);
-  }
-  return $self->collection->new(values %$data);
-}
-
+# query(), update(), create(), and delete_attachment() use this
 sub _set_error {
   my ($self, $errs) = @_;
 
@@ -525,6 +528,7 @@ sub _set_error {
   $self->{error} =~ s/\n$//;
 }
 
+# _entity_as_soap_data() uses this
 sub _udf_as_soap_data {
   my ($udfs) = @_;
 
@@ -542,6 +546,7 @@ sub _udf_as_soap_data {
   return SOAP::Data->name(UserDefinedFields => \SOAP::Data->value(@fields));
 }
 
+# query(), update(), and create() use this
 sub _validate_entity_argument {
   my ($self, $entity, $type) = @_;
 
@@ -571,24 +576,25 @@ sub _validate_entity_argument {
   if (!$e_type) {
     die "Missing entity argument in call to $type"
   }
-  elsif ( !grep {$_ eq $e_type} keys(%{$self->valid_entities}) ) {
+  elsif ( not exists $self->entities->{$e_type} ) {
     die "$e_type is not a valid entity. Valid entities are: " .
-        join(', ', keys(%{$self->valid_entities}))
+        join(', ', keys %{$self->entities})
   }
-  elsif ($self->valid_entities->{$e_type}->{$flag} eq 'false') {
+  elsif ($self->entities->{$e_type}->{$flag} eq 'false') {
     die "Not allowed to $type $e_type"
   }
 
   return 1;
 }
 
+# update() and create() use this
 sub _validate_fields {
   my ($self, $ent) = @_;
 
   my $type = blessed($ent);
-  my $e_info = $self->valid_entities->{$type};
+  my $e_info = $self->entities->{$type};
 
-  foreach my $f_name (keys(%$ent)) {
+  foreach my $f_name (keys %$ent) {
     if ($f_name eq 'UserDefinedFields') {
       # Special case field. Look at the actual user defined fields.
       # BUG: LOW: next is needed here to avoid an unsolved bug
@@ -605,57 +611,6 @@ sub _validate_fields {
   }
 
   return 1;
-}
-
-sub _write {
-  my ($self, $type, $entities) = @_;
-
-  die "Missing type argument in call to _write (create, delete, update)" unless $type && $type =~ /^(create|delete|update)$/;
-  die "Missing entity argument in call to _write" unless $entities;
-  die "Entities argument not of type Mojo::Collection" unless $entities->isa('Mojo::Collection');
-
-  my $done = $entities->new;
-  my $api_records_per = "_api_records_per_$type";
-
-  my $soap = $self->{_at_soap};
-
-  my $batch = Mojo::Collection->new;
-  my $todo  = Mojo::Collection->new;
-
-  # Validate that we have the right arguments.
-  $entities->each(sub {
-    $self->_validate_entity_argument($_, $type);
-
-    # Get the entity information if we don't already have it.
-    $self->_load_entity_field_info(blessed($_));
-
-    # Verify all fields provided are valid.
-    $self->_validate_fields($_);
-
-    # Autotask API limits how many updates can occur per update
-    # Create batches and push each full batch to the update collection
-    push @$batch, _entity_as_soap_data($_);
-    if ( $batch->size == $self->$api_records_per ) {
-      push @$todo, $batch;
-      $batch = $batch->new;
-    }
-  });
-  # Keep the final, unfilled batch
-  push @$todo, $batch if $batch->size;
-
-  $todo->each(sub {
-    my $res = $soap->$type(SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @$_)), $self->{_soap_tracking})->result;
-
-    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-      # There were errors. Grab the errors and set $@ to their textual values.
-      $self->_set_error($res->{Errors}->{ATWSError});
-      return undef;
-    }
-
-    push @$done, _get_entity_results($res);
-  });
-
-  return $done;
 }
 
 1;
