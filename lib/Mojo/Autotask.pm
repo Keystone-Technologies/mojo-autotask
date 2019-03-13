@@ -50,8 +50,9 @@ has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
 has ua          => sub { Mojo::UserAgent->new };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
 has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
+has _query      => sub { Mojo::Autotask::Query->new(at => shift) };
 
-has entities => sub {
+has entities    => sub {
   my $at = shift;
   my $entities;
   $at->get_entity_info_p->then(sub {
@@ -60,7 +61,7 @@ has entities => sub {
     }
     $entities->{$_->{Name}} = $_ foreach @{$_[0]};
   })->wait;
-  foreach my $entity ( keys %$entities ) {
+  foreach my $entity ( sort keys %$entities ) {
     warn "-- $entity" if DEBUG;
     # MED: These should be able to run in parallel
     $at->get_field_info_p($entity)->then(sub {
@@ -113,7 +114,7 @@ sub get_picklist_options {
 sub get_entity_info {
   my $self = shift;
   my $results;
-  $self->get_entity_info_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->get_entity_info_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
@@ -127,7 +128,7 @@ sub get_entity_info_p {
 sub get_field_info {
   my $self = shift;
   my $results;
-  $self->get_field_info_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->get_field_info_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
@@ -142,7 +143,7 @@ sub get_field_info_p {
 sub get_threshold_and_usage_info {
   my $self = shift;
   my $results;
-  $self->get_threshold_and_usage_info_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->get_threshold_and_usage_info_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
@@ -156,7 +157,7 @@ sub get_threshold_and_usage_info_p {
 sub get_udf_info {
   my $self = shift;
   my $results;
-  $self->get_udf_info_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->get_udf_info_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
@@ -171,7 +172,7 @@ sub get_udf_info_p {
 sub get_zone_info {
   my $self = shift;
   my $results;
-  $self->get_zone_info_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->get_zone_info_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
@@ -197,19 +198,21 @@ sub new {
 
   warn $self->soap_proxy->to_unsafe_string if DEBUG;
 
+  $self->entities;
+
   return $self;
 }
 
 sub query {
   my $self = shift;
   my $results;
-  $self->query_p(@_)->then(sub { $results = [@_] })->wait;
+  $self->query_p(@_)->then(sub { $results = shift })->wait;
   return $results;
 }
 
 sub query_p {
   my $self = shift;
-  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : Mojo::Autotask::Query->new(ref $_[0] eq 'HASH' ? shift : ());
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
   $query->entity(shift) if $_[0] && !ref $_[0];
   $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
 
@@ -219,43 +222,38 @@ sub query_p {
   warn dumper(\@$query) if DEBUG > 1;
   my $query_xml = $self->_create_query_xml($query->entity, \@$query);
   my $data = SOAP::Data->name('sXML')->value($query_xml);
-  $self->_cache(_post_p => query => $data => ONE_DAY)->then(sub {
-    my ($res, $mtime) = @_;
+  $self->_cache(_post_p => query => $data => $query->expire)->then(sub {
+    my $res = shift;
     if ($res->{Errors} || $res->{ReturnCode} ne '1') {
       # There were errors. Grab the errors and set $@ to their textual values.
       $self->_set_error($res->{Errors}->{ATWSError});
       return undef;
     }
     return $self->collection->new(_get_entity_results($res));
+  })->catch(sub {
+    return $self->collection->new;
   });
 }
 
 sub query_all {
   my $self = shift;
-  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : Mojo::Autotask::Query->new(ref $_[0] eq 'HASH' ? shift : ());
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
   $query->entity(shift) if $_[0] && !ref $_[0];
   $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
  
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
  
-  #my $key = join ':', '@MT' => (ref($self) || $self), $entity, Mojo::JSON::encode_json($query);
-  #$since = $self->redis->db->get($key) unless $since;
-
-  my $all = $self->collection->new;
-
+  my $data = {};
   while ( 1 ) {
-    $self->query_p($query)->then(sub {
-      my ($res) = @_;
-      $query->last_id(@$res == $self->_api_records_per_query ? $res->last->{id} : undef);
-      return if not defined $query->last_id;
-      push @$all, @$res;
-      warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total", $res->size, $query->last_id, $res->last->{CreateDate}||'', $all->size;
-    })->wait;
-    last if not defined $query->last_id;
+    my $res = $self->query($query);
+    last unless @$res;
+    $query->last_id($res->[-1]->{id});
+    $data = {%$data, map { $_->{id} => $_ } @$res};
+    warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total", $res->size, $query->last_id, $res->last->{CreateDate}||'', scalar keys %$data if DEBUG;
+    last if @$res < $self->_api_records_per_query;
   }
-
-  return $all;
+  return $self->collection->new(values %$data);
 }
 
 sub query_all_p { Mojo::Promise->resolve(shift->query_all(@_)) }
@@ -274,10 +272,7 @@ sub _cache {
     warn "-- Caching $method $action with Redis" if DEBUG;
     $self->redis->cache->refresh(REFRESH)->memoize_p(
       $self, $method => [@soap], $expire
-    )->then(sub {
-      $_[0]->[1] = localtime->new($_[0]->[1]);
-      return @{$_[0]};
-    })->catch(sub {
+    )->catch(sub {
       warn "Something went wrong in _cache: $_[0]";
     });
   } else {
@@ -290,10 +285,9 @@ sub _cache {
 sub _post_p {
   my ($self, $action) = (shift, shift);
   warn "-- Refresh $action (sending SOAP request)" if DEBUG;
-  warn dumper([@_]) if DEBUG > 1;
-  my $result;
+  warn dumper(\@_) if DEBUG > 1;
   $self->ua->post_p(@_)->then(sub {
-    [SOAP::Deserializer->deserialize(shift->result->dom)->result, localtime->epoch]
+    SOAP::Deserializer->deserialize(shift->result->dom)->result
   });
 }
 
@@ -353,7 +347,7 @@ sub _write {
 
   $todo->each(sub {
     my $data = SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @$_));
-    $self->_cache(_post_p => getZoneInfo => $data => ONE_DAY)->then(sub {
+    $self->_post_p(getZoneInfo => $data)->then(sub {
       push @$done, _get_entity_results(shift);
     })->wait;
   });

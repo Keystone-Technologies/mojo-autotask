@@ -10,13 +10,15 @@ use overload
                 },
   'fallback' => 1;
 
-use Role::Tiny;
+use Mojo::Autotask::Util 'localtime';
+use Mojo::JSON 'j';
+use Mojo::Util 'md5_sum';
+
 use Scalar::Util 'blessed';
-use Time::Piece;
 
-Role::Tiny->apply_roles_to_package('Time::Piece', 'Time::Piece::Role::More');
-
+has at            => sub { die };
 has entity        => sub { die };
+has expire        => 900;
 has last_activity => undef;
 has last_id       => 0;
 has now           => undef;
@@ -26,8 +28,7 @@ has start_date    => sub {
   my $self = shift;
   my $entity = $self->entity;
   return undef unless my $months = $self->$entity;
-  my $now = $self->now || localtime;
-  return $now->add_months($months * -1);
+  return $self->_localtime->add_months($months * -1);
 };
 
 has Account => undef;
@@ -61,6 +62,17 @@ has TicketNote => 12;
 has TimeEntry => 12;
 has UserDefinedFieldDefinition => undef;
 has UserDefinedFieldListItem => undef;
+
+sub key {
+  my $self = shift;
+  my $key = md5_sum(j([$self->_start_date, @{$self->query}]));
+  return join ':', '@MT' => (ref($self) || $self), $self->at->username, $self->at->tracking_id, $self->entity, $key;
+}
+
+sub new {
+  my $self = shift;
+  $self->SUPER::new((ref $self ? (at => $self->at) : ()), @_ ? @_ > 1 ? @_ : %{$_[0]} : ());
+}
 
 sub _last_activity {
   my $self = shift;
@@ -110,6 +122,12 @@ sub _last_id {
 }
 
 1;
+
+sub _localtime {
+  my $self = shift;
+  my $now = $self->now;
+  return blessed($now) && $now->isa('Time::Piece') ? $now : localtime;
+}
 
 sub _start_date {
   my $self = shift;

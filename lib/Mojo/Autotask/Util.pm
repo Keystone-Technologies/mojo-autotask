@@ -7,9 +7,9 @@ use Time::Piece;
 
 Role::Tiny->apply_roles_to_package('Time::Piece', 'Time::Piece::Role::More');
 
-our @EXPORT_OK = qw(grep in_list localtime);
+our @EXPORT_OK = qw(filter in_list localtime);
 
-sub grep {
+sub filter {
   return map { {name => $_->[0], expressions => [{op => $_->[1], value => $_->[2]}]} } @_;
 }
 
