@@ -43,11 +43,12 @@ has collection  => sub {
   /)->new
 };
 has ec          => sub { Mojo::Autotask::ExecuteCommand->new };
+has init        => 0;
 has password    => sub { $ENV{AUTOTASK_PASSWORD} or die };
 has redis       => sub { state $r = Mojo::Redis->new };
 has soap_proxy  => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
 has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
-has ua          => sub { Mojo::UserAgent->new };
+has ua          => sub { Mojo::UserAgent->new };#->with_roles('+Queued') };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
 has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
 has _query      => sub { Mojo::Autotask::Query->new(at => shift) };
@@ -56,21 +57,26 @@ has entities    => sub {
   my $at = shift;
   my $entities;
   $at->get_entity_info_p->then(sub {
-    if (!exists($_[0]) || ref($_[0]) ne 'ARRAY') {
-      die "Unable to get a list of valid Entities from the Autotask server";
-    }
-    $entities->{$_->{Name}} = $_ foreach @{$_[0]};
+    $entities->{$_->{Name}} = $_ foreach ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
   })->wait;
+  die "Unable to get a list of valid Entities from the Autotask server"
+    unless keys %$entities;
+  my @p;
   foreach my $entity ( sort keys %$entities ) {
-    warn "-- $entity" if DEBUG;
-    # MED: These should be able to run in parallel
-    $at->get_field_info_p($entity)->then(sub {
-      $entities->{$entity}->{fields}->{$_->{Name}} = $_ foreach @{$_[0]};
-    })->wait;
-    $at->get_udf_info_p($entity)->then(sub {
-      $entities->{$entity}->{fields}->{$_->{Name}} = $_ foreach map { $_->{IsUDF} = 'true'; $_ } @{$_[0]};
-    })->wait;
+    warn "-- get_info $entity" if DEBUG > 1;
+    push @p, $at->get_field_info_p($entity)->then(sub {
+      warn "-- get_field_info $entity" if DEBUG;
+      $entities->{$entity}->{fields}->{$_->{Name}} = $_
+        foreach ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
+    });
+    push @p, $at->get_udf_info_p($entity)->then(sub {
+      warn "-- get_udf_info $entity" if DEBUG;
+      $entities->{$entity}->{fields}->{$_->{Name}} = $_
+        foreach map { $_->{IsUDF} = 'true'; $_ }
+                ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
+    });
   }
+  Mojo::Promise->all(@p)->catch(sub{die dumper(\@_)})->wait;
   return $entities;
 };
 
@@ -112,39 +118,30 @@ sub get_picklist_options {
 }
 
 sub get_entity_info {
-  my $self = shift;
-  my $results;
-  $self->get_entity_info_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->get_entity_info_p(@_)->with_roles('+Get')->get;
 }
 
 sub get_entity_info_p {
   my $self = shift;
   $self->_cache(_post_p => GetEntityInfo => undef => ONE_DAY * 30)->then(sub {
-    shift->{EntityInfo}
+    ref $_[0] eq 'HASH' ? shift->{EntityInfo} : {};
   });
 }
 
 sub get_field_info {
-  my $self = shift;
-  my $results;
-  $self->get_field_info_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->get_field_info_p(@_)->with_roles('+Get')->get;
 }
 
 sub get_field_info_p {
   my ($self, $entity) = @_;
   my $data = SOAP::Data->name('psObjectType')->value($entity);
   $self->_cache(_post_p => GetFieldInfo => $data => ONE_DAY)->then(sub {
-    shift->{Field}
+    ref $_[0] eq 'HASH' ? shift->{Field} : {};
   });
 }
 
 sub get_threshold_and_usage_info {
-  my $self = shift;
-  my $results;
-  $self->get_threshold_and_usage_info_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->get_threshold_and_usage_info_p(@_)->with_roles('+Get')->get;
 }
 
 sub get_threshold_and_usage_info_p {
@@ -155,25 +152,19 @@ sub get_threshold_and_usage_info_p {
 }
 
 sub get_udf_info {
-  my $self = shift;
-  my $results;
-  $self->get_udf_info_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->get_udf_info_p(@_)->with_roles('+Get')->get;
 }
 
 sub get_udf_info_p {
   my ($self, $entity) = @_;
   my $data = SOAP::Data->name('psTable')->value($entity);
   $self->_cache(_post_p => getUDFInfo => $data => ONE_DAY)->then(sub {
-    shift->{Field}
+    ref $_[0] eq 'HASH' ? shift->{Field} : {};
   });
 }
 
 sub get_zone_info {
-  my $self = shift;
-  my $results;
-  $self->get_zone_info_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->get_zone_info_p(@_)->with_roles('+Get')->get;
 }
 
 sub get_zone_info_p {
@@ -189,30 +180,27 @@ sub new {
 
   my $userinfo = join ':', $self->username, $self->password;
   # LOW: Resolve recursively like WebService::Autotask?
-  $self->get_zone_info_p->then(sub {
-    my $zone_info = shift;
-    $self->soap_proxy(Mojo::URL->new($zone_info->{URL})
-                               ->userinfo($userinfo));
-    $self->ec->zone(Mojo::URL->new($zone_info->{WebUrl}));
-  })->wait;
+  my $zone_info = $self->get_zone_info;
+  $self->soap_proxy(Mojo::URL->new($zone_info->{URL})
+                             ->userinfo($userinfo));
+  $self->ec->zone(Mojo::URL->new($zone_info->{WebUrl}));
 
   warn $self->soap_proxy->to_unsafe_string if DEBUG;
 
-  $self->entities;
+  $self->entities if $self->init;
 
   return $self;
 }
 
 sub query {
-  my $self = shift;
-  my $results;
-  $self->query_p(@_)->then(sub { $results = shift })->wait;
-  return $results;
+  shift->query_p(@_)->with_roles('+Get')->get;
 }
 
 sub query_p {
   my $self = shift;
-  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query'
+            ? shift
+            : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
   $query->entity(shift) if $_[0] && !ref $_[0];
   $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
 
@@ -231,13 +219,16 @@ sub query_p {
     }
     return $self->collection->new(_get_entity_results($res));
   })->catch(sub {
+    warn dumper(\@_);
     return $self->collection->new;
   });
 }
 
 sub query_all {
   my $self = shift;
-  my $query = ref $_[0] eq 'Mojo::Autotask::Query' ? shift : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
+  my $query = ref $_[0] eq 'Mojo::Autotask::Query'
+            ? shift
+            : $self->_query->new(ref $_[0] eq 'HASH' ? shift : ());
   $query->entity(shift) if $_[0] && !ref $_[0];
   $query->query(shift) if $_[0] && ref $_[0] eq 'ARRAY';
  
@@ -250,7 +241,9 @@ sub query_all {
     last unless @$res;
     $query->last_id($res->[-1]->{id});
     $data = {%$data, map { $_->{id} => $_ } @$res};
-    warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total", $res->size, $query->last_id, $res->last->{CreateDate}||'', scalar keys %$data if DEBUG;
+    warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total",
+                 $res->size, $query->last_id, $res->last->{CreateDate}||'',
+                 scalar keys %$data if DEBUG;
     last if @$res < $self->_api_records_per_query;
   }
   return $self->collection->new(values %$data);
@@ -268,15 +261,17 @@ sub _cache {
   my ($self, $method, $action, $data, $expire) = @_;
   my @data = ref $data eq 'ARRAY' ? @$data : $data;
   my @soap = $self->_soap($action => @data);
-  if ( $self->redis && (not(defined($expire)) || $expire > 0) ) {
-    warn "-- Caching $method $action with Redis" if DEBUG;
-    $self->redis->cache->refresh(REFRESH)->memoize_p(
+  my $redis = $self->redis;
+  if ( $redis && (not(defined($expire)) || $expire > 0) ) {
+    warn "-- Caching $method $action with Redis" if DEBUG > 1;
+    my $res = $redis->cache->refresh(REFRESH)->memoize_p(
       $self, $method => [@soap], $expire
     )->catch(sub {
       warn "Something went wrong in _cache: $_[0]";
-    });
+    })->with_roles('+Get')->get;
+    Mojo::Promise->resolve($res);
   } else {
-    warn "-- No Caching $method $action with Redis" if DEBUG;
+    warn "-- No Caching $method $action with Redis" if DEBUG > 1;
     $self->$method(@soap);
   }
 }
@@ -284,16 +279,17 @@ sub _cache {
 # MED: Use minion to keep these queries refreshed
 sub _post_p {
   my ($self, $action) = (shift, shift);
-  warn "-- Refresh $action (sending SOAP request)" if DEBUG;
   warn dumper(\@_) if DEBUG > 1;
   $self->ua->post_p(@_)->then(sub {
+    warn "-- Refresh $action (sending SOAP request)" if DEBUG > 1;
     SOAP::Deserializer->deserialize(shift->result->dom)->result
   });
 }
 
 sub _soap {
   my ($self, $action) = (shift, shift);
-  warn "-- Building SOAP for $action (not yet sending SOAP request)" if DEBUG;
+  warn "-- Building SOAP for $action (not yet sending SOAP request)"
+    if DEBUG > 1;
   my @soap = (
     $action,
     $self->soap_proxy->to_unsafe_string,
@@ -317,9 +313,12 @@ sub _soap {
 sub _write {
   my ($self, $type, $collection) = @_;
 
-  die "Missing type argument in call to _write (create, delete, update)" unless $type && $type =~ /^(create|delete|update)$/;
-  die "Missing collection argument in call to _write" unless $collection;
-  die "Collection argument not of type Mojo::Collection" unless $collection->isa('Mojo::Collection');
+  die "Missing type argument in call to _write (create, delete, update)"
+    unless $type && $type =~ /^(create|delete|update)$/;
+  die "Missing collection argument in call to _write"
+    unless $collection;
+  die "Collection argument not of type Mojo::Collection"
+    unless $collection->isa('Mojo::Collection');
 
   my $api_records_per = "_api_records_per_$type";
 
@@ -346,10 +345,12 @@ sub _write {
   push @$todo, $batch if $batch->size;
 
   $todo->each(sub {
-    my $data = SOAP::Data->name('Entities')->value(\SOAP::Data->name('array' => @$_));
-    $self->_post_p(getZoneInfo => $data)->then(sub {
-      push @$done, _get_entity_results(shift);
-    })->wait;
+    my $data = SOAP::Data->name('Entities')
+                         ->value(\SOAP::Data->name('array' => @$_));
+    push @$done, {$type => $data};
+    #$self->_post_p($type => $data)->then(sub {
+    #  push @$done, _get_entity_results(shift);
+    #})->wait;
   });
 
   return $done;
@@ -418,7 +419,9 @@ sub _entity_as_soap_data {
     push @fields, $field;
   }
 
-  return SOAP::Data->name(Entity => \SOAP::Data->value(@fields))->attr({'xsi:type' => ref($entity)});
+  return SOAP::Data->name(
+    Entity => \SOAP::Data->value(@fields))->attr({'xsi:type' => ref($entity)}
+  );
 }
 
 # This function is used to return a consistent value: a list, not a ref
@@ -427,7 +430,9 @@ sub _get_entity_results {
   my ($result) = @_;
 
   # Make sure we have results to return.
-  if (!exists($result->{EntityResults}) || ref($result->{EntityResults}) ne 'HASH' || !exists($result->{EntityResults}->{Entity})) {
+  if (!exists($result->{EntityResults}) ||
+      ref($result->{EntityResults}) ne 'HASH' ||
+      !exists($result->{EntityResults}->{Entity})) {
     return ();
   }
 

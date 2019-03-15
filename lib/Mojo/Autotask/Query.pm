@@ -18,7 +18,7 @@ use Scalar::Util 'blessed';
 
 has at            => sub { die };
 has entity        => sub { die };
-has expire        => 900;
+has expire        => -1;
 has last_activity => undef;
 has last_id       => 0;
 has now           => undef;
@@ -27,6 +27,7 @@ has refresh       => undef;
 has start_date    => sub {
   my $self = shift;
   my $entity = $self->entity;
+  return undef unless $self->can($entity);
   return undef unless my $months = $self->$entity;
   return $self->_localtime->add_months($months * -1);
 };

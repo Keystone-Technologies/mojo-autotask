@@ -20,16 +20,22 @@ sub expand {
     push @expand, map { {$_ => $h->{$_}} } keys %$h;
   }
 
+  my $entities = {};
+  foreach my $entity ( keys %{$at->entities} ) {
+    my $fields = $at->entities->{$entity}->{fields};
+    $entities->{$entity} = Mojo::Collection->new(values %$fields);
+  }
+
   my $data = {};
   $self->map(sub {
     my ($entity, $record) = (ref $_, $_);
-    $at->entities->{$entity}->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
+    $entities->{$entity}->grep(sub{$_->{IsReference} eq 'true'})->each(sub{
       $record->{"$_->{Name}_ref"} = defined $_->{Name} && $_->{ReferenceEntityType} && defined $record->{$_->{Name}} ? join(':', $_->{ReferenceEntityType}, $record->{$_->{Name}}) : '';
     });
-    $at->entities->{$entity}->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
+    $entities->{$entity}->grep(sub{$_->{IsPickList} eq 'true'})->each(sub{
       $record->{"$_->{Name}_name"} = defined $_->{Name} && defined $record->{$_->{Name}} ? $at->get_picklist_options($entity, $_->{Name}, Value => $record->{$_->{Name}}) : '';
     });
-    $at->entities->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
+    $entities->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
       return unless $record->{$_->{Name}} && !ref $record->{$_->{Name}};
       $record->{$_->{Name}} =~ s/\.\d+$//;
       eval { $record->{$_->{Name}} = localtime->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
@@ -56,7 +62,7 @@ sub expand {
       my $query = [grep { ref eq 'HASH' } @$options];
       my @keys  = grep { !ref || ref eq 'ARRAY' } @$options;
       my $cache = md5_sum(b64_encode(j([$entity => $query])));
-      $data->{$cache} ||= $at->query($entity => $query)->expand($at)->hashify('id');
+      $data->{$cache} ||= $at->query_all($entity => $query)->expand($at)->hashify('id');
       foreach my $k ( @keys ? @keys : keys %{$data->{$cache}->{$id}} ) {
         $record->{"${col}_$k"} = $data->{$cache}->{$id}->{$k};
       }
@@ -65,13 +71,23 @@ sub expand {
   });
 }
 
+sub collapse {
+  my $self = shift;
+  $self->map(sub {
+    my $record = $_;
+    delete $record->{$_} for grep { /_name$|_ref_|_ref$|^UDF_/ } keys %$record;
+    $record->{$_} = $record->{$_}->epoch for grep { ref && $_->isa('Time::Piece') } keys %$record;
+    $_ = $record;
+  });
+}
+
 sub to_date {
   my ($self, $format) = @_;
   $format ||= '%m/%d/%Y %H:%M:%S';
   $self->map(sub{
-    my $h = $_;
-    $h->{$_} = $h->{$_}->strftime($format) foreach grep { ref $h->{$_} eq 'Time::Piece' } keys %$h;
-    $_ = $h;
+    my $record = $_;
+    $record->{$_} = $record->{$_}->strftime($format) foreach grep { ref $record->{$_} eq 'Time::Piece' } keys %$record;
+    $_ = $record;
   });
 }
 
