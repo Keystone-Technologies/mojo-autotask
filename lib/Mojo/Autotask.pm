@@ -51,7 +51,7 @@ has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
 has ua          => sub { Mojo::UserAgent->new };#->with_roles('+Queued') };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
 has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
-has _query      => sub { Mojo::Autotask::Query->new(at => shift) };
+has _query      => sub { Mojo::Autotask::Query->new };#(at => shift) };
 
 has entities    => sub {
   my $at = shift;
@@ -123,7 +123,7 @@ sub get_entity_info {
 
 sub get_entity_info_p {
   my $self = shift;
-  $self->_cache(_post_p => GetEntityInfo => undef => ONE_DAY * 30)->then(sub {
+  $self->_memoize_p(_post_p => GetEntityInfo => undef => ONE_DAY * 30)->then(sub {
     ref $_[0] eq 'HASH' ? shift->{EntityInfo} : {};
   });
 }
@@ -135,7 +135,7 @@ sub get_field_info {
 sub get_field_info_p {
   my ($self, $entity) = @_;
   my $data = SOAP::Data->name('psObjectType')->value($entity);
-  $self->_cache(_post_p => GetFieldInfo => $data => ONE_DAY)->then(sub {
+  $self->_memoize_p(_post_p => GetFieldInfo => $data => ONE_DAY)->then(sub {
     ref $_[0] eq 'HASH' ? shift->{Field} : {};
   });
 }
@@ -146,7 +146,7 @@ sub get_threshold_and_usage_info {
 
 sub get_threshold_and_usage_info_p {
   my $self = shift;
-  $self->_cache(_post_p => getThresholdAndUsageInfo => undef => 0)->then(sub {
+  $self->_memoize_p(_post_p => getThresholdAndUsageInfo => undef => 3)->then(sub {
     shift->{EntityReturnInfoResults}->{EntityReturnInfo}
   });
 }
@@ -158,7 +158,7 @@ sub get_udf_info {
 sub get_udf_info_p {
   my ($self, $entity) = @_;
   my $data = SOAP::Data->name('psTable')->value($entity);
-  $self->_cache(_post_p => getUDFInfo => $data => ONE_DAY)->then(sub {
+  $self->_memoize_p(_post_p => getUDFInfo => $data => ONE_DAY)->then(sub {
     ref $_[0] eq 'HASH' ? shift->{Field} : {};
   });
 }
@@ -170,7 +170,7 @@ sub get_zone_info {
 sub get_zone_info_p {
   my $self = shift;
   my $data = SOAP::Data->name('UserName')->value($self->username);
-  $self->_cache(_post_p => getZoneInfo => $data => ONE_DAY * 30)->then(sub {
+  $self->_memoize_p(_post_p => getZoneInfo => $data => ONE_DAY * 30)->then(sub {
     shift
   });
 }
@@ -210,18 +210,37 @@ sub query_p {
   warn dumper(\@$query) if DEBUG > 1;
   my $query_xml = $self->_create_query_xml($query->entity, \@$query);
   my $data = SOAP::Data->name('sXML')->value($query_xml);
-  $self->_cache(_post_p => query => $data => $query->expire)->then(sub {
-    my $res = shift;
-    if ($res->{Errors} || $res->{ReturnCode} ne '1') {
-      # There were errors. Grab the errors and set $@ to their textual values.
-      $self->_set_error($res->{Errors}->{ATWSError});
-      return undef;
-    }
-    return $self->collection->new(_get_entity_results($res));
-  })->catch(sub {
-    warn dumper(\@_);
-    return $self->collection->new;
-  });
+  my @soap = $self->_soap(query => $data);
+  if ( $self->redis && defined $query->expire ) {
+    warn "-- Caching _post_p query with Redis" if DEBUG > 1;
+    my $res = $self->redis->cache->refresh(REFRESH)->compute_p(
+      $query->key, $query->expire, sub { $self->_post_p(@soap) }
+    )->then(sub {
+      my $res = shift;
+      if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+        die $res->{Errors}->{ATWSError};
+      }
+      $self->collection->new(_get_entity_results($res));
+    })->catch(sub {
+      warn "Something went wrong in query_p: $_[0]";
+      $self->collection->new;
+    })->with_roles('+Get')->get;
+    $self->redis->db->persist(join ':', $self->redis->cache->namespace, $query->key)
+      unless $query->expire || $res->size < $self->_api_records_per_query;
+    Mojo::Promise->resolve($res);
+  } else {
+    warn "-- Not Caching _post_p query with Redis" if DEBUG > 1;
+    $self->_post_p(@soap)->then(sub {
+      my $res = shift;
+      if ($res->{Errors} || $res->{ReturnCode} ne '1') {
+        die $res->{Errors}->{ATWSError};
+      }
+      $self->collection->new(_get_entity_results($res));
+    })->catch(sub {
+      warn "Something went wrong in query_p: $_[0]";
+      $self->collection->new;
+    });
+  }
 }
 
 sub query_all {
@@ -237,12 +256,13 @@ sub query_all {
  
   my $data = {};
   while ( 1 ) {
+    my $md5_sum = $query->_md5_sum;
     my $res = $self->query($query);
     last unless @$res;
     $query->last_id($res->[-1]->{id});
     $data = {%$data, map { $_->{id} => $_ } @$res};
-    warn sprintf "-- %s records fetched (last id %s, create_date %s), %s total",
-                 $res->size, $query->last_id, $res->last->{CreateDate}||'',
+    warn sprintf "-- %s records fetched from %s (last id %s, create_date %s), %s total",
+                 $res->size, $md5_sum, $query->last_id, $res->last->{CreateDate}||'',
                  scalar keys %$data if DEBUG;
     last if @$res < $self->_api_records_per_query;
   }
@@ -257,21 +277,21 @@ sub update_p { shift->_write_p(update => shift) }
 
 ###
 
-sub _cache {
+sub _memoize_p {
   my ($self, $method, $action, $data, $expire) = @_;
   my @data = ref $data eq 'ARRAY' ? @$data : $data;
   my @soap = $self->_soap($action => @data);
   my $redis = $self->redis;
-  if ( $redis && (not(defined($expire)) || $expire > 0) ) {
+  if ( $redis && defined $expire ) {
     warn "-- Caching $method $action with Redis" if DEBUG > 1;
     my $res = $redis->cache->refresh(REFRESH)->memoize_p(
       $self, $method => [@soap], $expire
     )->catch(sub {
-      warn "Something went wrong in _cache: $_[0]";
+      warn "Something went wrong in _memoize_p: $_[0]";
     })->with_roles('+Get')->get;
     Mojo::Promise->resolve($res);
   } else {
-    warn "-- No Caching $method $action with Redis" if DEBUG > 1;
+    warn "-- Not Caching $method $action with Redis" if DEBUG > 1;
     $self->$method(@soap);
   }
 }

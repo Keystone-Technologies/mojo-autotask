@@ -16,9 +16,9 @@ use Mojo::Util 'md5_sum';
 
 use Scalar::Util 'blessed';
 
-has at            => sub { die };
+#has at            => sub { die };
 has entity        => sub { die };
-has expire        => -1;
+has expire        => 0;
 has last_activity => undef;
 has last_id       => 0;
 has now           => undef;
@@ -66,14 +66,19 @@ has UserDefinedFieldListItem => undef;
 
 sub key {
   my $self = shift;
-  my $key = md5_sum(j([$self->_start_date, @{$self->query}]));
-  return join ':', '@MT' => (ref($self) || $self), $self->at->username, $self->at->tracking_id, $self->entity, $key;
+  #return join ':', '@MT' => (ref($self) || $self), $self->at->username, $self->at->tracking_id, $self->entity, $key;
+  return join ':', '@MT' => (ref($self) || $self), $self->entity, $self->_md5_sum;
 }
 
-sub new {
+sub _md5_sum {
   my $self = shift;
-  $self->SUPER::new((ref $self ? (at => $self->at) : ()), @_ ? @_ > 1 ? @_ : %{$_[0]} : ());
+  md5_sum(j([$self->_last_id, $self->_start_date, @{$self->query}]));
 }
+
+#sub new {
+#  my $self = shift;
+#  $self->SUPER::new((ref $self ? (at => $self->at) : ()), @_ ? @_ > 1 ? @_ : %{$_[0]} : ());
+#}
 
 sub _last_activity {
   my $self = shift;
