@@ -7,6 +7,8 @@ use Mojo::Util qw/b64_encode dumper md5_sum/;
 
 use Scalar::Util 'blessed';
 
+use constant DEBUG => $ENV{MOJO_AUTOTASK_DEBUG} || 0;
+
 requires 'map';
 
 # $at->query('Ticket')->expand($at, ['ResourceID'])->grep(sub{$_->{ResourceID_ref_Name} eq 'John'})->size;
@@ -26,6 +28,7 @@ sub expand {
     $entities->{$entity} = Mojo::Collection->new(values %$fields);
   }
 
+  warn '-- Expanding' if DEBUG;
   my $data = {};
   $self->map(sub {
     my ($entity, $record) = (ref $_, $_);
@@ -75,8 +78,15 @@ sub collapse {
   my $self = shift;
   $self->map(sub {
     my $record = $_;
-    delete $record->{$_} for grep { /_name$|_ref_|_ref$|^UDF_/ } keys %$record;
-    $record->{$_} = $record->{$_}->epoch for grep { ref && $_->isa('Time::Piece') } keys %$record;
+    for ( grep { /^UDF_/ } keys %$record ) {
+      my $value = $record->{$_};
+      s/^UDF_//;
+      my $udf = {Name => $_};
+      $udf->{Value} = $value if defined $value && length $value;
+      push @{$record->{UserDefinedFields}->{UserDefinedField}}, $udf;
+    }
+    delete $record->{$_} for grep { /_name$|_ref_|_ref$|^UDF_|^_/ } keys %$record;
+    $record->{$_} = $record->{$_}->strftime("%Y-%m-%dT%T") for grep { blessed($record->{$_}) && $record->{$_}->isa('Time::Piece') } keys %$record;
     $_ = $record;
   });
 }
@@ -86,7 +96,7 @@ sub to_date {
   $format ||= '%m/%d/%Y %H:%M:%S';
   $self->map(sub{
     my $record = $_;
-    $record->{$_} = $record->{$_}->strftime($format) foreach grep { ref $record->{$_} eq 'Time::Piece' } keys %$record;
+    $record->{$_} = $record->{$_}->strftime($format) foreach grep { blessed($record->{$_}) && $record->{$_}->isa('Time::Piece') } keys %$record;
     $_ = $record;
   });
 }

@@ -77,21 +77,6 @@ sub delete_attachment_p {}
 
 sub get_attachment_p {}
 
-#Where Value == 8, return Label
-#Where Label eq Partner, return Value
-sub get_picklist_options {
-  my ($self, $entity, $field, $kv, $vk) = @_;
-  die unless $entity && $field;
-  $self->load_field_and_udf_info($entity);
-  my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
-  return unless $picklist;
-  return $picklist unless $kv;
-  my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
-  $picklist = {map { $_->{$kv} => $_ } @$picklist};
-  return $picklist unless defined $vk;
-  return $picklist->{$vk}->{$_kv};
-}
-
 sub get_entity_info {
   shift->get_entity_info_p(@_)->with_roles('+Get')->get;
 }
@@ -113,6 +98,21 @@ sub get_field_info_p {
   $self->_memoize_p(_post_p => GetFieldInfo => $data => ONE_DAY)->then(sub {
     ref $_[0] eq 'HASH' ? shift->{Field} : {};
   });
+}
+
+#Where Value == 8, return Label
+#Where Label eq Partner, return Value
+sub get_picklist_options {
+  my ($self, $entity, $field, $kv, $vk) = @_;
+  die unless $entity && $field;
+  #$self->load_field_and_udf_info($entity);
+  my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
+  return unless $picklist;
+  return $picklist unless $kv;
+  my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
+  $picklist = {map { $_->{$kv} => $_ } @$picklist};
+  return $picklist unless defined $vk;
+  return $picklist->{$vk}->{$_kv};
 }
 
 sub get_threshold_and_usage_info {
@@ -302,7 +302,8 @@ sub query_all {
     my $res = $self->query($query);
     last unless @$res;
     $query->last_id($res->[-1]->{id});
-    $data = {%$data, map { $_->{id} => {%$_, _batch => $query->key} } @$res};
+    $_->{_batch} = $query->key for @$res;
+    $data = {%$data, map { $_->{id} => $_ } @$res};
     warn sprintf "-- %s records, batch %s (last id %s, create_date %s), %s total",
                  $res->size, $md5_sum, $query->last_id, $res->last->{CreateDate}||'',
                  scalar keys %$data if DEBUG;
