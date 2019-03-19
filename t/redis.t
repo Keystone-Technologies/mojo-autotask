@@ -11,9 +11,9 @@ use Mojo::Autotask::Util qw(filter in_list localtime);
 use Mojo::Util 'dumper';
 
 my $at = Mojo::Autotask->new;
-say $at->query_all('Ticket')->expand($at, [qw/AccountID/])->dump(0);
-done_testing; exit;
 
+#say $at->query_all('Ticket')->expand($at, [qw/AccountID/])->dump(0);
+#done_testing; exit;
 #say $at->query('AccountAlert')->expand($at, {AccountID => ['AccountName']})->grep(sub{$_->{AccountID_ref_AccountName}})->dump;
 #my $res = $at->query_all('AccountAlert')->expand($at, {AccountID => ['AccountName']})->grep(sub{$_->{AccountID_ref_AccountName}});
 #say $res->each(sub{$_->{AlertText}=~tr/A-Z/a-z/})->dump(0..2);
