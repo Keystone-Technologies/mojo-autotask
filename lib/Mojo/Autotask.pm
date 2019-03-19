@@ -20,8 +20,8 @@ use Scalar::Util qw(blessed);
 use MIME::Base64;
 use Encode;
 
-use constant DEBUG   => $ENV{MOJO_AUTOTASK_DEBUG}   || 0;
-use constant REFRESH => $ENV{MOJO_AUTOTASK_REFRESH} || 0;
+use constant DEBUG      => $ENV{MOJO_AUTOTASK_DEBUG}   || 0;
+use constant REFRESH    => $ENV{MOJO_AUTOTASK_REFRESH} || 0;
 
 use vars qw($VERSION);
 $VERSION = '1.60';
@@ -43,7 +43,8 @@ has collection  => sub {
   /)->new
 };
 has ec          => sub { Mojo::Autotask::ExecuteCommand->new };
-has init        => 0;
+has entities    => sub { {} };
+has init        => sub { $ENV{MOJO_AUTOTASK_INIT} // 1 };
 has password    => sub { $ENV{AUTOTASK_PASSWORD} or die };
 has redis       => sub { state $r = Mojo::Redis->new };
 has soap_proxy  => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
@@ -52,33 +53,6 @@ has ua          => sub { Mojo::UserAgent->new };#->with_roles('+Queued') };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
 has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
 has _query      => sub { Mojo::Autotask::Query->new };#(at => shift) };
-
-has entities    => sub {
-  my $at = shift;
-  my $entities;
-  $at->get_entity_info_p->then(sub {
-    $entities->{$_->{Name}} = $_ foreach ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
-  })->wait;
-  die "Unable to get a list of valid Entities from the Autotask server"
-    unless keys %$entities;
-  my @p;
-  foreach my $entity ( sort keys %$entities ) {
-    warn "-- get_info $entity" if DEBUG > 1;
-    push @p, $at->get_field_info_p($entity)->then(sub {
-      warn "-- get_field_info $entity" if DEBUG;
-      $entities->{$entity}->{fields}->{$_->{Name}} = $_
-        foreach ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
-    });
-    push @p, $at->get_udf_info_p($entity)->then(sub {
-      warn "-- get_udf_info $entity" if DEBUG;
-      $entities->{$entity}->{fields}->{$_->{Name}} = $_
-        foreach map { $_->{IsUDF} = 'true'; $_ }
-                ref $_[0] eq 'ARRAY' ? @{$_[0]} : ();
-    });
-  }
-  Mojo::Promise->all(@p)->catch(sub{die dumper(\@_)})->wait;
-  return $entities;
-};
 
 has _api_records_per_create => 200;
 has _api_records_per_delete => 200;
@@ -108,6 +82,7 @@ sub get_attachment_p {}
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die unless $entity && $field;
+  $self->load_field_and_udf_info($entity);
   my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
   return unless $picklist;
   return $picklist unless $kv;
@@ -175,6 +150,56 @@ sub get_zone_info_p {
   });
 }
 
+sub load_entity_info {
+  shift->load_entity_info_p(@_)->wait;
+}
+
+sub load_entity_info_p {
+  my $self = shift;
+  return Mojo::Promise->resolve unless $self->init || !keys %{$self->entities};
+  $self->init(0);
+  $self->get_entity_info_p->then(sub {
+    foreach ( ref $_[0] eq 'ARRAY' ? @{$_[0]} : () ) {
+      my $backup_fields = $self->_backup_fields($_->{Name});
+      $_->{fields} = $backup_fields if $backup_fields;
+      $self->entities->{$_->{Name}} = $_;
+    }
+    die "Unable to get a list of valid Entities from the Autotask server"
+      unless keys %{$self->entities};
+  });
+}
+
+sub load_field_and_udf_info {
+  shift->load_field_and_udf_info_p(@_)->with_roles('+Get')->get;
+}
+
+sub load_field_and_udf_info_p {
+  my $self = shift;
+  my @p = ();
+  foreach my $entity ( sort @_ ) {
+#warn dumper({$entity => exists $self->entities->{$entity}->{fields}});
+    next unless $self->init || !exists $self->entities->{$entity}->{fields};
+    warn "-- get_info $entity" if DEBUG > 1;
+    push @p, $self->get_field_info_p($entity)->then(sub {
+      my $res = shift;
+      warn "-- get_field_info $entity" if DEBUG;
+      $res = [] unless ref $res eq 'ARRAY';
+      $self->entities->{$entity}->{fields}->{$_->{Name}} = $_ for @$res;
+      return $_[0];
+    });
+    push @p, $self->get_udf_info_p($entity)->then(sub {
+      my $res = shift;
+      warn "-- get_udf_info $entity" if DEBUG;
+      $res = [] unless ref $res eq 'ARRAY';
+      $res = [map { $_->{IsUDF} = 'true'; $_ } @$res];
+      $self->entities->{$entity}->{fields}->{$_->{Name}} = $_ for @$res;
+      return $_[0];
+    });
+  }
+  $self->init(0);
+  @p ? Mojo::Promise->all(@p) : Mojo::Promise->resolve;
+}
+
 sub new {
   my $self = shift->SUPER::new(@_);
 
@@ -187,9 +212,18 @@ sub new {
 
   warn $self->soap_proxy->to_unsafe_string if DEBUG;
 
-  $self->entities if $self->init;
+  if ( $self->redis ) {
+    $self->redis->pubsub->listen('schema:update:entity' => sub {
+      my ($pubsub) = @_;
+      $self->init(1)->load_entity_info_p;
+    });
+    $self->redis->pubsub->listen('schema:update:field_and_udf' => sub {
+      my ($pubsub, $entity) = @_;
+      $self->init(1)->load_field_and_udf_info_p($entity);
+    });
+  }
 
-  return $self;
+  return $self->_init_schema;
 }
 
 sub query {
@@ -207,12 +241,15 @@ sub query_p {
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
 
+  $self->load_field_and_udf_info($query->entity);
+
   warn dumper(\@$query) if DEBUG > 1;
   my $query_xml = $self->_create_query_xml($query->entity, \@$query);
   my $data = SOAP::Data->name('sXML')->value($query_xml);
   my @soap = $self->_soap(query => $data);
   if ( $self->redis && defined $query->expire ) {
     warn "-- Caching _post_p query with Redis" if DEBUG > 1;
+    # I think we can go back to memoize_p
     my $res = $self->redis->cache->refresh(REFRESH)->compute_p(
       $query->key, $query->expire, sub { $self->_post_p(@soap) }
     )->then(sub {
@@ -225,6 +262,9 @@ sub query_p {
       warn "Something went wrong in query_p: $_[0]";
       $self->collection->new;
     })->with_roles('+Get')->get;
+    # It's nice to support the persist feature, but it proly shouldn't be used
+    # That will be a lot of data sitting around never getting touched
+    # The expiration should be the end of the CreateDate range
     $self->redis->db->persist(join ':', $self->redis->cache->namespace, $query->key)
       unless $query->expire || $res->size < $self->_api_records_per_query;
     Mojo::Promise->resolve($res);
@@ -254,19 +294,34 @@ sub query_all {
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
  
-  my $data = {};
+  $self->load_field_and_udf_info($query->entity);
+
+  my $data = $query->data || {};
   while ( 1 ) {
     my $md5_sum = $query->_md5_sum;
     my $res = $self->query($query);
     last unless @$res;
     $query->last_id($res->[-1]->{id});
-    $data = {%$data, map { $_->{id} => $_ } @$res};
-    warn sprintf "-- %s records fetched from %s (last id %s, create_date %s), %s total",
+    $data = {%$data, map { $_->{id} => {%$_, _batch => $query->key} } @$res};
+    warn sprintf "-- %s records, batch %s (last id %s, create_date %s), %s total",
                  $res->size, $md5_sum, $query->last_id, $res->last->{CreateDate}||'',
                  scalar keys %$data if DEBUG;
     last if @$res < $self->_api_records_per_query;
   }
-  return $self->collection->new(values %$data);
+  $data = $self->collection->new(values %$data);
+  return $data;
+  # HIGH:
+  # This may add some new records, but it may also be an update for a previously cached record
+  if ( my $field = $query->refresh_field && !$query->data ) {
+    $query->last_activity($data->sort(sub{$a->{$field} <=> $b->{$field}})->last->{$field});
+    $query->data({map { $_->{id} => $_ } @$data});
+    my $updates = $self->query_all($query);
+    if ( $updates->size ) {
+      # Need to update the redis keys with these updates
+      $data = $updates;
+    }
+  }
+  return $data;
 }
 
 sub query_all_p { Mojo::Promise->resolve(shift->query_all(@_)) }
@@ -276,6 +331,21 @@ sub update { shift->_write(update => shift) }
 sub update_p { shift->_write_p(update => shift) }
 
 ###
+
+sub _backup_fields {
+  my ($self, $entity) = @_;
+  return unless $self->entities->{$entity};
+  return unless $self->entities->{$entity}->{fields};
+  $self->entities->{$entity}->{fields};
+}
+
+sub _init_schema {
+  my $self = shift;
+  my $init = $self->init;
+  $self->init(1)->load_entity_info;
+  $self->init(1)->load_field_and_udf_info(keys %{$self->entities}) if $init;
+  return $self;
+}
 
 sub _memoize_p {
   my ($self, $method, $action, $data, $expire) = @_;
@@ -349,6 +419,8 @@ sub _write {
   # Validate that we have the right arguments.
   $collection->each(sub {
     $self->_validate_entity_argument($_, $type);
+
+    $self->load_field_and_udf_info($_);
 
     # Verify all fields provided are valid.
     $self->_validate_fields($_);

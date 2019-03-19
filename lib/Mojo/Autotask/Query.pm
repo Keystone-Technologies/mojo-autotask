@@ -17,6 +17,7 @@ use Mojo::Util 'md5_sum';
 use Scalar::Util 'blessed';
 
 #has at            => sub { die };
+has data          => undef;
 has entity        => sub { die };
 has expire        => 0;
 has last_activity => undef;
@@ -70,6 +71,29 @@ sub key {
   return join ':', '@MT' => (ref($self) || $self), $self->entity, $self->_md5_sum;
 }
 
+sub refresh_field {
+  my $self = shift;
+  my %map = (
+    Account => 'LastActivityDate',
+    AccountNote => 'LastModifiedDate',
+    AccountToDo => 'LastModifiedDate',
+    Contact => 'LastActivityDate', # LOW: OR with LastModifiedDate
+    ContractNote => 'LastActivityDate',
+    Opportunity => 'LastActivity',
+    Phase => 'LastActivityDateTime',
+    ProjectNote => 'LastActivityDate',
+    Service => 'LastModifiedDate',
+    ServiceBundle => 'LastModifiedDate',
+    ServiceCall => 'LastModifiedDateTime',
+    Task => 'LastActivityDateTime',
+    TaskNote => 'LastActivityDate',
+    Ticket => 'LastActivityDate',
+    TicketNote => 'LastActivityDate',
+    TimeEntry => 'LastModifiedDateTime',
+  );
+  return $map{$self->entity};
+}
+
 sub _md5_sum {
   my $self = shift;
   md5_sum(j([$self->_last_id, $self->_start_date, @{$self->query}]));
@@ -84,41 +108,8 @@ sub _last_activity {
   my $self = shift;
   return () unless my $t = $self->last_activity;
   return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
-  my $entity = $self->entity;
-  if ( $entity eq 'Account' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'AccountNote' ) {
-    return {name => 'LastModifiedDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'AccountToDo' ) {
-    return {name => 'LastModifiedDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Contact' ) { # LOW: OR with LastModifiedDate
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'ContractNote' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Opportunity' ) {
-    return {name => 'LastActivity', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Phase' ) {
-    return {name => 'LastActivityDateTime', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'ProjectNote' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Service' ) {
-    return {name => 'LastModifiedDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'ServiceBundle' ) {
-    return {name => 'LastModifiedDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'ServiceCall' ) {
-    return {name => 'LastModifiedDateTime', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Task' ) {
-    return {name => 'LastActivityDateTime', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'TaskNote' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'Ticket' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'TicketNote' ) {
-    return {name => 'LastActivityDate', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  } elsif ( $entity eq 'TimeEntry' ) {
-    return {name => 'LastModifiedDateTime', expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-  }
-  return ();
+  return () unless $self->refresh_field;
+  return {name => $self->refresh_field, expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
 }
 
 sub _last_id {
