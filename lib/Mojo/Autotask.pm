@@ -20,8 +20,8 @@ use Scalar::Util qw(blessed);
 use MIME::Base64;
 use Encode;
 
-use constant DEBUG      => $ENV{MOJO_AUTOTASK_DEBUG}   || 0;
-use constant REFRESH    => $ENV{MOJO_AUTOTASK_REFRESH} || 0;
+use constant DEBUG   => $ENV{MOJO_AUTOTASK_DEBUG}   || 0;
+use constant REFRESH => $ENV{MOJO_AUTOTASK_REFRESH} || 0;
 
 use vars qw($VERSION);
 $VERSION = '1.60';
@@ -47,6 +47,7 @@ has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
 has ua          => sub { Mojo::UserAgent->new };#->with_roles('+Queued') };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
 has ws_url      => sub { Mojo::URL->new('http://autotask.net/ATWS/v1_6/') };
+
 has _query      => sub { Mojo::Autotask::Query->new };#(at => shift) };
 
 has _api_records_per_create => 200;
@@ -60,16 +61,20 @@ sub create { shift->_write(create => shift) }
 
 sub create_p { shift->_write_p(create => shift) }
 
+# HIGH
 sub create_attachment_p {}
 
 # HIGH: Test this, this is just copied from create()
 #       Need to read the API
+# BTW:  Need to test SOAP functions just like WebService::Autotask
 sub delete { shift->_write(delete => shift) }
 
 sub delete_p { shift->_write_p(delete => shift) }
 
+# HIGH
 sub delete_attachment_p {}
 
+# HIGH
 sub get_attachment_p {}
 
 sub get_entity_info {
@@ -206,6 +211,9 @@ sub new {
 
   warn $self->soap_proxy->to_unsafe_string if DEBUG;
 
+  # LOW: implement a notifier system
+  # The idea is that when one process updates the cached data, any other
+  # processes could be notified to re-update their in-memory data
   if ( $self->redis ) {
     $self->redis->pubsub->listen('schema:update:entity' => sub {
       my ($pubsub) = @_;
@@ -235,15 +243,13 @@ sub query_p {
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
 
-  $self->load_field_and_udf_info($query->entity);
-
   warn dumper(\@$query) if DEBUG > 1;
   my $query_xml = $self->_create_query_xml($query->entity, \@$query);
   my $data = SOAP::Data->name('sXML')->value($query_xml);
   my @soap = $self->_soap(query => $data);
   if ( $self->redis && defined $query->expire ) {
     warn "-- Caching _post_p query with Redis" if DEBUG > 1;
-    # I think we can go back to memoize_p
+    # HIGH: I think we can go back to memoize_p
     my $res = $self->redis->cache->refresh(REFRESH)->compute_p(
       $query->key, $query->expire, sub { $self->_post_p(@soap) }
     )->then(sub {
@@ -288,8 +294,6 @@ sub query_all {
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
  
-  $self->load_field_and_udf_info($query->entity);
-
   my $data = $query->data || {};
   while ( 1 ) {
     my $md5_sum = $query->_md5_sum;
@@ -416,8 +420,6 @@ sub _write {
   $collection->each(sub {
     $self->_validate_entity_argument($_, $type);
 
-    $self->load_field_and_udf_info($_);
-
     # Verify all fields provided are valid.
     $self->_validate_fields($_);
 
@@ -447,7 +449,7 @@ sub _write {
 sub _write_p { Mojo::Promise->resolve(shift->_write(@_)) }
 
 ###
-# These functions are from WebService::Autotask
+# These 9 functions are from WebService::Autotask
 ###
 
 # LOW: Mojo::DOM should be able to do this
@@ -592,6 +594,7 @@ sub _parse_field {
   return $f_elem;
 }
 
+# LOW: Change this to be more Mojo-like
 # query(), update(), create(), and delete_attachment() use this
 sub _set_error {
   my ($self, $errs) = @_;
@@ -670,6 +673,8 @@ sub _validate_entity_argument {
   elsif ($self->entities->{$e_type}->{$flag} eq 'false') {
     die "Not allowed to $type $e_type"
   }
+
+  $self->load_field_and_udf_info($entity);
 
   return 1;
 }

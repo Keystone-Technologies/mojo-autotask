@@ -5,7 +5,7 @@ use Exporter 'import';
 use Role::Tiny;
 use Time::Piece;
 
-Role::Tiny->apply_roles_to_package('Time::Piece', 'Time::Piece::Role::More');
+Role::Tiny->apply_roles_to_package('Time::Piece', 'Time::Piece::Role::Autotask');
 
 our @EXPORT_OK = qw(filter in_list localtime);
 
