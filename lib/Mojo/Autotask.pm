@@ -35,12 +35,7 @@ my @VALID_OPS = qw(
 my @VALID_CONDITIONS = qw(AND OR);
 
 has collection  => sub {
-  Mojo::Collection->with_roles(qw/
-    +UtilsBy
-    +Hashes
-    Mojo::Autotask::Role::Expand
-    Mojo::Autotask::Role::Tablify
-  /)->new
+  Mojo::Collection->with_roles(qw/+Autotask +Hashes +UtilsBy/)->new
 };
 has ec          => sub { Mojo::Autotask::ExecuteCommand->new };
 has entities    => sub { {} };
@@ -105,7 +100,7 @@ sub get_field_info_p {
 sub get_picklist_options {
   my ($self, $entity, $field, $kv, $vk) = @_;
   die unless $entity && $field;
-  #$self->load_field_and_udf_info($entity);
+  #$self->load_field_and_udf_info($entity); # Is this necessary? Really slows everything down
   my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
   return unless $picklist;
   return $picklist unless $kv;
@@ -177,7 +172,6 @@ sub load_field_and_udf_info_p {
   my $self = shift;
   my @p = ();
   foreach my $entity ( sort @_ ) {
-#warn dumper({$entity => exists $self->entities->{$entity}->{fields}});
     next unless $self->init || !exists $self->entities->{$entity}->{fields};
     warn "-- get_info $entity" if DEBUG > 1;
     push @p, $self->get_field_info_p($entity)->then(sub {
@@ -373,6 +367,7 @@ sub _post_p {
   warn dumper(\@_) if DEBUG > 1;
   $self->ua->post_p(@_)->then(sub {
     warn "-- Refresh $action (sending SOAP request)" if DEBUG > 1;
+    #Mojo::File::tempfile(UNLINK => 0)->spurt($_[0]->result->dom);
     SOAP::Deserializer->deserialize(shift->result->dom)->result
   });
 }
