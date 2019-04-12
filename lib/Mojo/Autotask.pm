@@ -3,7 +3,7 @@ use Mojo::Base -base;
 
 use Mojo::Autotask::ExecuteCommand;
 use Mojo::Autotask::Query;
-use Mojo::Autotask::Util 'localtime';
+use Mojo::Autotask::Util 'parse_datetime';
 use Mojo::Collection;
 use Mojo::JSON;
 use Mojo::Promise;
@@ -283,6 +283,7 @@ sub query_p {
   }
 }
 
+# This subroutine can recurse, no more than once.
 sub query_all {
   my $self = shift;
   my $query = ref $_[0] eq 'Mojo::Autotask::Query'
@@ -294,7 +295,8 @@ sub query_all {
   # Validate that we have the right arguments.
   $self->_validate_entity_argument($query->entity, 'query');
  
-  my $data = $query->data || {};
+  # Get all the batches
+  my $data = {};
   while ( 1 ) {
     my $md5_sum = $query->_md5_sum;
     my $res = $self->query($query);
@@ -302,25 +304,28 @@ sub query_all {
     $query->last_id($res->[-1]->{id});
     $_->{_batch} = $query->key for @$res;
     $data = {%$data, map { $_->{id} => $_ } @$res};
-    warn sprintf "-- %s records, batch %s (last id %s, create_date %s), %s total",
-                 $res->size, $md5_sum, $query->last_id, $res->last->{CreateDate}||'',
+    warn sprintf "-- [%s] %s %s records (last id %s created %s), %s total",
+                 $md5_sum, $res->size, $query->entity, $query->last_id,
+                 ($query->create_field?$res->last->{$query->create_field}:'-'),
                  scalar keys %$data if DEBUG;
     last if @$res < $self->_api_records_per_query;
   }
-  $data = $self->collection->new(values %$data);
-  return $data;
-  # HIGH:
-  # This may add some new records, but it may also be an update for a previously cached record
-  if ( my $field = $query->refresh_field && !$query->data ) {
-    $query->last_activity($data->sort(sub{$a->{$field} <=> $b->{$field}})->last->{$field});
-    $query->data({map { $_->{id} => $_ } @$data});
-    my $updates = $self->query_all($query);
-    if ( $updates->size ) {
-      # Need to update the redis keys with these updates
-      $data = $updates;
-    }
-  }
-  return $data;
+  return $data if $query->refreshing;
+  return $self->collection->new(values %$data)
+    unless my $field = $query->refresh_field;
+
+  # query_all records in the set updated since the last cached activity
+  my $last = ((sort { $data->{$b}->{$field} cmp $data->{$a}->{$field} } keys %$data)[0]);
+  my $last_activity = parse_datetime($data->{$last}->{$field});
+  $query->last_id(0)->refreshing(1)->last_activity($last_activity);
+  my $updates = $self->query_all($query);
+  $data = {%$data, %$updates};
+  warn sprintf '-- %s %s updated records, %s total',
+               scalar keys %$updates, $query->entity,
+               scalar keys %$data if DEBUG;
+
+  # LOW: Update the redis keys with these updates?
+  return $self->collection->new(values %$data);
 }
 
 sub query_all_p { Mojo::Promise->resolve(shift->query_all(@_)) }
@@ -573,7 +578,7 @@ sub _parse_field {
   my ($self, $entity, $doc, $field) = @_;
 
   # Check to see that this entity actually has a field with this name.
-  die "Invalid query field " . $field->{name} . " for entity $entity"
+  die Mojo::Util::dumper($self->entities->{$entity})."Invalid query field " . $field->{name} . " for entity $entity"
     if (!$self->entities->{$entity}->{fields}->{$field->{name}}->{IsQueryable});
   my $f_elem = $doc->createElement('field');
   if ($self->entities->{$entity}->{fields}->{$field->{name}}->{IsUDF}) {

@@ -1,7 +1,7 @@
 package Mojo::Collection::Role::Autotask;
 use Mojo::Base -role;
 
-use Mojo::Autotask::Util 'localtime';
+use Mojo::Autotask::Util 'parse_datetime';
 use Mojo::JSON 'j';
 use Mojo::Util qw/b64_encode dumper md5_sum/;
 
@@ -62,8 +62,7 @@ sub expand {
     });
     $entities->{$entity}->grep(sub{$_->{Type} eq 'datetime'})->each(sub{
       return unless $record->{$_->{Name}} && !ref $record->{$_->{Name}};
-      $record->{$_->{Name}} =~ s/\.\d+$//;
-      eval { $record->{$_->{Name}} = localtime->strptime($record->{$_->{Name}}, "%Y-%m-%dT%T"); };
+      eval { $record->{$_->{Name}} = parse_datetime($record->{$_->{Name}}); };
       delete $record->{$_->{Name}} if $@;
     });
     if ( $record->{UserDefinedFields} && $record->{UserDefinedFields}->{UserDefinedField} && ref $record->{UserDefinedFields}->{UserDefinedField} eq 'ARRAY' ) {

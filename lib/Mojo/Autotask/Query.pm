@@ -17,7 +17,6 @@ use Mojo::Util 'md5_sum';
 use Scalar::Util 'blessed';
 
 #has at            => sub { die };
-has data          => undef;
 has entity        => sub { die };
 has expire        => 0;
 has last_activity => undef;
@@ -25,6 +24,7 @@ has last_id       => 0;
 has now           => undef;
 has query         => sub { [] };
 has refresh       => undef;
+has refreshing    => 0;
 has start_date    => sub {
   my $self = shift;
   my $entity = $self->entity;
@@ -37,6 +37,7 @@ has Account => undef;
 has AccountNote => 12;
 has AccountToDo => 12;
 has Appointment => 12;
+has AttachmentInfo => 12;
 has BillingItem => 12;
 has Contact => undef;
 has ContractCost => 48;
@@ -94,47 +95,13 @@ sub refresh_field {
   return $map{$self->entity};
 }
 
-sub _md5_sum {
+sub create_field {
   my $self = shift;
-  md5_sum(j([$self->_last_id, $self->_start_date, @{$self->query}]));
-}
-
-#sub new {
-#  my $self = shift;
-#  $self->SUPER::new((ref $self ? (at => $self->at) : ()), @_ ? @_ > 1 ? @_ : %{$_[0]} : ());
-#}
-
-sub _last_activity {
-  my $self = shift;
-  return () unless my $t = $self->last_activity;
-  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
-  return () unless $self->refresh_field;
-  return {name => $self->refresh_field, expressions => [{op => 'GreaterThanOrEquals', value => $t->datetime}]};
-}
-
-sub _last_id {
-  my $self = shift;
-  my $last_id = $self->last_id;
-  return {name => 'id', expressions => [{op => ($last_id ? 'GreaterThan' : 'GreaterThanOrEquals'), value => "$last_id"}]};
-}
-
-1;
-
-sub _localtime {
-  my $self = shift;
-  my $now = $self->now;
-  return blessed($now) && $now->isa('Time::Piece') ? $now : localtime;
-}
-
-sub _start_date {
-  my $self = shift;
-  return () unless my $t = $self->start_date;
-  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
-  my $entity = $self->entity;
-  my %limits = (
+  my %map = (
     Account => 'CreateDate',
     AccountToDo => 'CreateDateTime',
     Appointment => 'CreateDateTime',
+    AttachmentInfo => 'AttachDate',
     BillingItem => 'ItemDate',
     Contact => 'CreateDate',
     ContractCost => 'CreateDate',
@@ -163,7 +130,46 @@ sub _start_date {
     UserDefinedFieldDefinition => 'CreateDate',
     UserDefinedFieldListItem => 'CreateDate',
   );
-  return () unless my $name = $limits{$entity};
+  return $map{$self->entity};
+}
+
+sub _md5_sum {
+  my $self = shift;
+  md5_sum(j([$self->refreshing, $self->_last_id, $self->_start_date, @{$self->query}]));
+}
+
+#sub new {
+#  my $self = shift;
+#  $self->SUPER::new((ref $self ? (at => $self->at) : ()), @_ ? @_ > 1 ? @_ : %{$_[0]} : ());
+#}
+
+sub _last_activity {
+  my $self = shift;
+  return () unless my $t = $self->last_activity;
+  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
+  return () unless $self->refresh_field;
+  return {name => $self->refresh_field, expressions => [{op => 'GreaterThan', value => $t->datetime}]};
+}
+
+sub _last_id {
+  my $self = shift;
+  my $last_id = $self->last_id;
+  return {name => 'id', expressions => [{op => ($last_id ? 'GreaterThan' : 'GreaterThanOrEquals'), value => "$last_id"}]};
+}
+
+1;
+
+sub _localtime {
+  my $self = shift;
+  my $now = $self->now;
+  return blessed($now) && $now->isa('Time::Piece') ? $now : localtime;
+}
+
+sub _start_date {
+  my $self = shift;
+  return () unless my $t = $self->start_date;
+  return () unless $t = localtime->new(blessed($t) && $t->isa('Time::Piece') ? $t->epoch : $t);
+  return () unless my $name = $self->create_field;
   my $now = $self->now || localtime;
   return (
     {name => $name, expressions => [{op => 'GreaterThanOrEquals', value => $t->strftime('%Y-%m-01T00:00:00')}]},
