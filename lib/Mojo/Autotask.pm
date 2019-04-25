@@ -297,7 +297,7 @@ sub query_p {
       }
       $self->collection->new(_get_entity_results($res));
     })->catch(sub {
-      warn "Something went wrong in query_p: $_[0]";
+      warn 'Something went wrong in query_p: '.Mojo::Util::dumper($_[0]);
       $self->collection->new;
     })->with_roles('+Get')->get;
     # It's nice to support the persist feature, but it proly shouldn't be used
