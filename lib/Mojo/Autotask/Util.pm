@@ -42,13 +42,16 @@ sub in_list {
 sub in_list_a { [in_list(@_)] }
 
 sub parse_datetime {
-  my $dt = shift;
+  my ($dt, $tz) = (shift, shift || '+0000');
+  if ( $dt =~ /^(\d{2})\W(\d{2})\W(\d{4}) (\d{2})\W(\d{2})\W(\d{2})$/ ) {
+    $dt = "$3-$1-$2T$4:$5:$6";
+  }
   if ( length($dt) == length('YYYY-mm-ddTHH:MM:SS') ) {
-    localtime->strptime($dt, '%Y-%m-%dT%T');
+    localtime->strptime($dt.$tz, '%Y-%m-%dT%T%z');
   } elsif ( length($dt) > length('YYYY-mm-ddTHH:MM:SS') ) {
     # Need to add 1 to timestamp because the timestamp field is in
     # milliseconds and needs to be rounded up
-    localtime->strptime(strip_ms($dt), '%Y-%m-%dT%T') + 1;
+    localtime->strptime(strip_ms($dt).$tz, '%Y-%m-%dT%T%z') + 1;
   }
 }
 

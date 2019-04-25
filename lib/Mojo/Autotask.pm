@@ -43,6 +43,7 @@ has init        => sub { $ENV{MOJO_AUTOTASK_INIT} // 1 };
 has password    => sub { $ENV{AUTOTASK_PASSWORD} or die };
 has redis       => sub { state $r = Mojo::Redis->new };
 has soap_proxy  => sub { Mojo::URL->new('https://webservices.autotask.net/atservices/1.6/atws.asmx') };
+has tz_offset   => '+0100'; # Autotask Web Services API stores and returns all time data in Eastern Standard Time (EST); this default is Central Time
 has tracking_id => sub { $ENV{AUTOTASK_TRACKINGID} or die };
 has ua          => sub { Mojo::UserAgent->new };#->with_roles('+Queued') };
 has username    => sub { $ENV{AUTOTASK_USERNAME} or die };
@@ -62,7 +63,33 @@ sub create { shift->_write(create => shift) }
 sub create_p { shift->_write_p(create => shift) }
 
 # HIGH
-sub create_attachment_p {}
+sub create_attachment_p {
+  my ($self, $attach) = @_;
+
+  # Get the entity information if we don't already have it.
+  my $atb = "Attachment";
+  my $ati = $atb . "Info";
+  $self->_load_entity_field_info($ati);
+
+  # Collect the Info fields
+  my $e_info = $self->entities->{$ati};
+  my @inf;
+  foreach my $f_name ( keys %{$attach->{Info}} ) {
+    die "Field $f_name is not a valid field for $ati"
+      if !$e_info->{fields}->{$f_name};
+    push @inf, SOAP::Data->name($f_name => $attach->{Info}->{$f_name});
+  }
+ 
+  my $data = SOAP::Data->name("attachment" => \SOAP::Data->value(
+               SOAP::Data->name(Info => \SOAP::Data->value(@inf))->attr({'xsi:type' => $ati}),
+               SOAP::Data->name('Data')->value(decode("utf8", $attach->{Data}))->type('base64Binary'),
+             ))->attr({'xsi:type' => $atb}); 
+  $self->_memoize_p(_post_p => CreateAttachment => $data)->then(sub {
+    #$_->valueof('//CreateAttachmentResponse/CreateAttachmentResult');
+    warn Mojo::Util::dumper($_);
+    return $_;
+  });
+}
 
 # HIGH: Test this, this is just copied from create()
 #       Need to read the API
@@ -71,11 +98,22 @@ sub delete { shift->_write(delete => shift) }
 
 sub delete_p { shift->_write_p(delete => shift) }
 
-# HIGH
-sub delete_attachment_p {}
+sub delete_attachment_p {
+  my ($self, $id) = @_;
+  my $data = SOAP::Data->name('attachmentId')->value($id);
+  $self->_memoize_p(_post_p => DeleteAttachment => $data)->then(sub {
+    return 1 unless $_;
+  });
+}
 
-# HIGH
-sub get_attachment_p {}
+# MED: Cache GetAttachment
+sub get_attachment_p {
+  my ($self, $id) = @_;
+  my $data = SOAP::Data->name('attachmentId')->value($id);
+  $self->_memoize_p(_post_p => GetAttachment => $data)->then(sub {
+    Mojo::Asset::Memory->new->add_chunk(decode_base64(shift->{Data}));
+  });
+}
 
 sub get_entity_info {
   shift->get_entity_info_p(@_)->with_roles('+Get')->get;
@@ -107,7 +145,7 @@ sub get_picklist_options {
   die unless $entity && $field;
   #$self->load_field_and_udf_info($entity); # Is this necessary? Really slows everything down
   my $picklist = $self->entities->{$entity}->{fields}->{$field}->{PicklistValues}->{PickListValue};
-  return unless $picklist;
+  return unless $picklist && ref $picklist eq 'ARRAY';
   return $picklist unless $kv;
   my $_kv = $kv eq 'Value' ? 'Label' : 'Value';
   $picklist = {map { $_->{$kv} => $_ } @$picklist};
@@ -316,7 +354,7 @@ sub query_all {
 
   # query_all records in the set updated since the last cached activity
   my $last = ((sort { $data->{$b}->{$field} cmp $data->{$a}->{$field} } keys %$data)[0]);
-  my $last_activity = parse_datetime($data->{$last}->{$field});
+  my $last_activity = parse_datetime($data->{$last}->{$field}, $self->tz_offset);
   $query->last_id(0)->refreshing(1)->last_activity($last_activity);
   my $updates = $self->query_all($query);
   $data = {%$data, %$updates};
